@@ -26,6 +26,7 @@ use std::ops::Deref;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::slice;
 use std::sync::Arc;
+use std::any::Any;
 
 use arc_swap::{ArcSwap, Guard};
 
@@ -34,9 +35,7 @@ use storage::device::RafsBioDesc;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags,
-    RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable,
-    RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
+    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_alloc_bio_desc_dedup, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable, RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
@@ -466,6 +465,7 @@ impl OndiskInodeWrapper {
 
         Ok((xattr_data, xattr_size))
     }
+
 }
 
 impl RafsInode for OndiskInodeWrapper {
@@ -748,6 +748,17 @@ impl RafsInode for OndiskInodeWrapper {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 
+    fn alloc_bio_desc_dedup(&self, dedup_inode: &Arc<dyn RafsInode>, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
+        let dedup_inode = dedup_inode.as_any()
+        .downcast_ref::<OndiskInodeWrapper>()
+        .ok_or_else(|| einval!("Failed to downcast dedup_inode to OndiskInodeWrapper"))?;
+
+        rafsv5_alloc_bio_desc_dedup(self, dedup_inode, offset, size, user_io)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     impl_inode_wrapper!(is_dir, bool);
     impl_inode_wrapper!(is_reg, bool);
     impl_inode_wrapper!(is_symlink, bool);

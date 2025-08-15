@@ -15,6 +15,7 @@ use std::io::{ErrorKind, Read, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
+use std::any::Any;
 
 use fuse_backend_rs::abi::linux_abi;
 use fuse_backend_rs::api::filesystem::Entry;
@@ -501,6 +502,19 @@ impl RafsInode for CachedInodeV5 {
         }
     }
 
+    fn alloc_bio_desc_dedup(
+        &self,
+        _dedup_ino: &Arc<dyn RafsInode>,
+        _offset: u64,
+        _size: usize,
+        _user_io: bool,
+    ) -> Result<RafsBioDesc> {
+        unimplemented!("CachedInodeV5 does not yet implement alloc_bio_desc_dedup");
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        unimplemented!("CachedInodeV5 does not yet implement as_any");
+    }
     impl_getter!(ino, i_ino, u64);
     impl_getter!(parent, i_parent, u64);
     impl_getter!(size, i_size, u64);

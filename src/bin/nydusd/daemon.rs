@@ -21,6 +21,7 @@ use std::sync::{
 };
 use std::thread;
 use std::{error, fmt, io};
+use std::fs;
 
 use event_manager::{EventOps, EventSubscriber, Events};
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
@@ -378,6 +379,18 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
         FsBackendType::Rafs => {
             let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
             let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
+
+            // Todo: temporary , need to consider GC
+            let boot_dir = Path::new("/data00/nydus/boot");
+            if let Err(e) = fs::create_dir_all(&boot_dir) {
+                eprintln!("Failed to create boot directory: {}", e);
+            }
+            let src_path = Path::new(&cmd.source);
+            let dest_path = boot_dir.join("image.boot");
+            if let Err(e) = fs::copy(&src_path, &dest_path) {
+                eprintln!("Failed to copy file: {}", e);
+            }
+
             let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
             rafs.import(bootstrap, prefetch_files)?;
             info!("Rafs imported");

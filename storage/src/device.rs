@@ -262,6 +262,11 @@ pub struct RafsBio {
     /// It might be initiated by user io amplification. With this flag, lower device
     /// layer is acknowledged with how to fill up user provided buffer.
     pub user_io: bool,
+
+    /// reference to the chunk
+    pub local_chunkinfo: Arc<dyn RafsChunkInfo>,
+    /// reference to the blob where the chunk is located
+    pub local_blob: Arc<RafsBlobEntry>,
 }
 
 impl Debug for RafsBio {
@@ -273,6 +278,10 @@ impl Debug for RafsBio {
             .field("file offset", &self.offset)
             .field("size", &self.size)
             .field("user", &self.user_io)
+            .field("blob id", &self.blob.blob_id)
+            .field("chunk id", &format!("{}", &self.chunkinfo.block_id()))
+            .field("local blob id", &self.local_blob.blob_id)
+            .field("local chunk id",  &format!("{}", self.local_chunkinfo.block_id()))
             .finish()
     }
 }
@@ -287,12 +296,23 @@ impl RafsBio {
         user_io: bool,
     ) -> Self {
         RafsBio {
-            chunkinfo,
-            blob,
+            chunkinfo: chunkinfo.clone(),
+            blob: blob.clone(),
             offset,
             size,
             blksize,
             user_io,
+            local_chunkinfo: chunkinfo,
+            local_blob: blob,
         }
+    }
+
+    pub fn update(
+        &mut self,
+        chunkinfo: Arc<dyn RafsChunkInfo>,
+        blob: Arc<RafsBlobEntry>
+    ) {
+        self.local_chunkinfo = chunkinfo;
+        self.local_blob = blob;
     }
 }

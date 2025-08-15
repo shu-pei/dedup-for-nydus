@@ -162,7 +162,7 @@ func (fs *filesystem) WaitUntilReady(ctx context.Context, snapshotID string) err
 		}
 		return nil
 	},
-		retry.Attempts(3),
+		retry.Attempts(30),
 		retry.LastErrorOnly(true),
 		retry.Delay(100*time.Millisecond),
 	)

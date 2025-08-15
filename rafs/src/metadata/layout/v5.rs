@@ -1109,6 +1109,49 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     Ok(desc)
 }
 
+pub(crate) fn rafsv5_alloc_bio_desc_dedup<I: RafsInode + RafsV5InodeOps>(
+    inode: &I,
+    dedup_inode: &I,
+    offset: u64,
+    size: usize,
+    user_io: bool,
+) -> Result<RafsBioDesc> {
+    // Do not process zero size bio
+    let mut desc = RafsBioDesc::new();
+    if size == 0 {
+        return Ok(desc);
+    }
+
+    let end = offset
+        .checked_add(size as u64)
+        .ok_or_else(|| einval!("invalid read size"))?;
+
+    let blksize = inode.get_blocksize() as u64;
+    let (index_start, index_end) = calculate_bio_chunk_index(
+        offset,
+        end,
+        blksize,
+        inode.get_child_count(),
+        inode.has_hole(),
+    );
+
+    trace!(
+            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
+            offset, size, inode.size(), blksize, index_start, index_end, inode.get_child_count()
+        );
+
+    for idx in index_start..index_end {
+        let chunk = inode.get_chunk_info(idx)?;
+        let blob = inode.get_blob_by_index(chunk.blob_index())?;
+        let local_chunk = dedup_inode.get_chunk_info(idx)?;
+        let local_blob = dedup_inode.get_blob_by_index(local_chunk.blob_index())?;
+        if !add_chunk_to_bio_desc_dedup(offset, end, chunk, &mut desc, blksize as u32, blob, user_io, local_chunk, local_blob) {
+            break;
+        }
+    }
+
+    Ok(desc)
+}
 /// Add a new bio covering the IO range into the provided bio desc. Returns
 /// true if caller should continue checking more chunks.
 ///
@@ -1159,6 +1202,50 @@ fn add_chunk_to_bio_desc(
     true
 }
 
+fn add_chunk_to_bio_desc_dedup(
+    offset: u64,
+    end: u64,
+    chunk: Arc<dyn RafsChunkInfo>,
+    desc: &mut RafsBioDesc,
+    blksize: u32,
+    blob: Arc<RafsBlobEntry>,
+    user_io: bool,
+    local_chunk: Arc<dyn RafsChunkInfo>,
+    local_blob: Arc<RafsBlobEntry>,
+) -> bool {
+    if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
+        return true;
+    }
+    if end <= chunk.file_offset() {
+        return false;
+    }
+
+    let chunk_start = if offset > chunk.file_offset() {
+        offset - chunk.file_offset()
+    } else {
+        0
+    };
+    let chunk_end = if end < (chunk.file_offset() + chunk.decompress_size() as u64) {
+        end - chunk.file_offset()
+    } else {
+        chunk.decompress_size() as u64
+    };
+
+    let mut bio = RafsBio::new(
+        chunk,
+        blob,
+        chunk_start as u32,
+        (chunk_end - chunk_start) as usize,
+        blksize,
+        user_io,
+    );
+
+    bio.update(local_chunk, local_blob);
+
+    desc.bi_size += bio.size;
+    desc.bi_vec.push(bio);
+    true
+}
 /// Calculate bio chunk indices that overlaps with the provided IO range.
 ///
 /// offset: IO offset to the file start, inclusive.

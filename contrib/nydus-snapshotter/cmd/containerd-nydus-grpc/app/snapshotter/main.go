@@ -8,6 +8,7 @@ package snapshotter
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pkg/errors"
 
@@ -26,5 +27,12 @@ func Start(ctx context.Context, cfg config.Config) error {
 	opt := ServeOptions{
 		ListeningSocketPath: cfg.Address,
 	}
+
+	go func() {
+		if err := startServer("/tmp/nydusmap.sock", stopSignal); err != nil {
+			fmt.Println("Server stopped with error:", err)
+		}
+	}()
+
 	return Serve(ctx, rs, opt, stopSignal)
 }

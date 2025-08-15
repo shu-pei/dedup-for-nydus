@@ -28,6 +28,7 @@ type DaemonConfig struct {
 	Device         DeviceConfig `json:"device"`
 	Mode           string       `json:"mode"`
 	DigestValidate bool         `json:"digest_validate"`
+	Deduplicate    bool         `json:"deduplicate"`
 	IOStatsFiles   bool         `json:"iostats_files,omitempty"`
 	EnableXattr    bool         `json:"enable_xattr,omitempty"`
 	FSPrefetch     struct {
@@ -43,10 +44,10 @@ type DeviceConfig struct {
 		BackendType string `json:"type"`
 		Config      struct {
 			// Localfs backend configs
-			BlobFile      string `json:"blob_file,omitempty"`
-			Dir           string `json:"dir,omitempty"`
-			ReadAhead     bool   `json:"readahead"`
-			ReadAheadSec  int    `json:"readahead_sec,omitempty"`
+			BlobFile     string `json:"blob_file,omitempty"`
+			Dir          string `json:"dir,omitempty"`
+			ReadAhead    bool   `json:"readahead"`
+			ReadAheadSec int    `json:"readahead_sec,omitempty"`
 
 			// Registry backend configs
 			Host               string `json:"host,omitempty"`
@@ -64,10 +65,10 @@ type DeviceConfig struct {
 			ObjectPrefix    string `json:"object_prefix,omitempty"`
 
 			// Shared by registry and oss backend
-			Scheme        string `json:"scheme,omitempty"`
+			Scheme string `json:"scheme,omitempty"`
 
 			// Below configs are common configs shared by all backends
-			Proxy         struct {
+			Proxy struct {
 				URL           string `json:"url,omitempty"`
 				Fallback      bool   `json:"fallback"`
 				PingURL       string `json:"ping_url,omitempty"`
@@ -83,7 +84,7 @@ type DeviceConfig struct {
 		Compressed bool   `json:"compressed,omitempty"`
 		Config     struct {
 			WorkDir           string `json:"work_dir"`
-			DisableIndexedMap bool `json:"disable_indexed_map"`
+			DisableIndexedMap bool   `json:"disable_indexed_map"`
 		} `json:"config"`
 	} `json:"cache"`
 }

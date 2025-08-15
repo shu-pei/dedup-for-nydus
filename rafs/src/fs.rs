@@ -101,6 +101,8 @@ pub struct RafsConfig {
     #[serde(default)]
     pub digest_validate: bool,
     #[serde(default)]
+    pub deduplicate: bool,
+    #[serde(default)]
     pub iostats_files: bool,
     #[serde(default)]
     pub fs_prefetch: FsPrefetchControl,
@@ -618,20 +620,28 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
+        info!("begin read\n");
         let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
         if offset >= inode.size() {
             recorder.mark_success(0);
             return Ok(0);
         }
-        let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
+        let dedup_inode = self.sb.get_dedup_inode(ino, false)?;
+        let mut desc = inode.alloc_bio_desc_dedup(&dedup_inode, offset, size as usize, true)?;
         let mut all_cached = true;
+
+        for bio in &desc.bi_vec {
+            if bio.chunkinfo.block_id() != bio.local_chunkinfo.block_id() {
+                info!("unequal\n");
+            }
+        }
 
         if self.amplify_io != 0 {
             if let Some(d) = self.amplify_io.checked_sub(size) {
                 for b in &desc.bi_vec {
-                    let c = b.chunkinfo.as_ref();
-                    let blob = b.blob.as_ref();
+                    let c = b.local_chunkinfo.as_ref();
+                    let blob = b.local_blob.as_ref();
                     all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
                 }
                 // Try to amplify user io from here, aim at better performance.
@@ -658,6 +668,7 @@ impl FileSystem for Rafs {
             recorder.mark_success(r);
             r
         });
+        info!("end read\n");
         self.ios.latency_end(&start, Read);
         r
     }

@@ -44,7 +44,7 @@ pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
 struct BlobCacheState {
     /// Index blob info by blob index, HashMap<blob_index, (blob_file, blob_size, Arc<ChunkMap>)>.
-    blob_map: HashMap<u32, (File, u64, Arc<dyn ChunkMap + Sync + Send>)>,
+    blob_map: HashMap<String, (File, u64, Arc<dyn ChunkMap + Sync + Send>)>,
     work_dir: String,
     backend_size_valid: bool,
     metrics: Arc<BlobcacheMetrics>,
@@ -54,7 +54,7 @@ struct BlobCacheState {
 impl BlobCacheState {
     fn get(&self, blob: &RafsBlobEntry) -> Option<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
         self.blob_map
-            .get(&blob.blob_index)
+            .get(&blob.blob_id)
             .map(|(file, size, chunk_map)| (file.as_raw_fd(), *size, chunk_map.clone()))
     }
 
@@ -74,6 +74,7 @@ impl BlobCacheState {
             .open(&blob_file_path)?;
         let fd = file.as_raw_fd();
 
+        info!("self.backend_size_valid is {}\n", self.backend_size_valid);
         let size = if self.backend_size_valid {
             self.backend
                 .blob_size(&blob.blob_id)
@@ -95,7 +96,7 @@ impl BlobCacheState {
         };
 
         self.blob_map
-            .insert(blob.blob_index, (file, size, chunk_map.clone()));
+            .insert(blob.blob_id.clone(), (file, size, chunk_map.clone()));
 
         self.metrics
             .underlying_files
@@ -247,10 +248,18 @@ struct RequestRegion {
     pub cki_tags: Vec<bool>,
     user_appended: bool,
     blob_entry: Arc<RafsBlobEntry>,
+
+    pub local_blob_address: u64,
+    pub local_blob_len: u32,
+    pub local_seg_offset: u32,
+    pub local_seg_len: u32,
+    pub local_cki_set: Vec<Arc<dyn RafsChunkInfo>>,
+    pub local_cki_tags: Vec<bool>,
+    local_blob_entry: Arc<RafsBlobEntry>,
 }
 
 impl RequestRegion {
-    fn new(region_type: RegionType, blob_entry: Arc<RafsBlobEntry>) -> Self {
+    fn new(region_type: RegionType, blob_entry: Arc<RafsBlobEntry>, local_blob_entry: Arc<RafsBlobEntry>) -> Self {
         RequestRegion {
             region_type,
             blob_address: 0,
@@ -263,6 +272,14 @@ impl RequestRegion {
             seg_len: 0,
             user_appended: false,
             blob_entry,
+
+            local_blob_address: 0,
+            local_blob_len: 0,
+            local_seg_offset: 0,
+            local_seg_len: 0,
+            local_cki_set: Vec::new(),
+            local_cki_tags: Vec::new(),
+            local_blob_entry
         }
     }
 
@@ -272,27 +289,41 @@ impl RequestRegion {
         len: u32,
         segment: IoInitiator,
         cki: Option<Arc<dyn RafsChunkInfo>>,
+        local_start: u64,
+        local_len: u32,
+        local_segment: IoInitiator,
+        local_cki: Option<Arc<dyn RafsChunkInfo>>,
     ) -> StorageResult<()> {
         if self.status == RequestRegionStatus::Open
-            && self.blob_address + self.blob_len as u64 != start
+            && (self.blob_address + self.blob_len as u64 != start
+            || self.local_blob_address + self.local_blob_len as u64 != local_start)
         {
             return Err(StorageError::NotContinuous);
         }
 
         if !self.user_appended {
             if let IoInitiator::User(ref s) = segment {
-                self.seg_offset = s.offset;
-                self.seg_len = s.len;
-                self.user_appended = true;
+                if let IoInitiator::User(ref ls) = local_segment {
+                    self.seg_offset = s.offset;
+                    self.seg_len = s.len;
+                    self.local_seg_offset = ls.offset;
+                    self.local_seg_len = ls.len;
+                    self.user_appended = true;
+                }
             }
         } else if let IoInitiator::User(ref s) = segment {
-            self.seg_len += s.len;
+            if let IoInitiator::User(ref ls) = local_segment {
+                self.seg_len += s.len;
+                self.local_seg_len += ls.len;
+            }
         }
 
         if self.status == RequestRegionStatus::Init {
             self.status = RequestRegionStatus::Open;
             self.blob_address = start;
             self.blob_len = len;
+            self.local_blob_address = local_start;
+            self.local_blob_len = local_len;
             self.concatenated = 1;
 
             if let Some(c) = cki {
@@ -303,11 +334,20 @@ impl RequestRegion {
                     self.cki_tags.push(false);
                 }
             }
+            if let Some(c) = local_cki {
+                self.local_cki_set.push(c);
+                if let IoInitiator::User(_) = local_segment {
+                    self.local_cki_tags.push(true);
+                } else {
+                    self.local_cki_tags.push(false);
+                }
+            }
             return Ok(());
         }
 
         assert_eq!(self.status, RequestRegionStatus::Open);
         self.blob_len += len;
+        self.local_blob_len += local_len;
         self.concatenated += 1;
 
         if let Some(c) = cki {
@@ -316,6 +356,14 @@ impl RequestRegion {
                 self.cki_tags.push(true);
             } else {
                 self.cki_tags.push(false);
+            }
+        }
+        if let Some(c) = local_cki {
+            self.local_cki_set.push(c);
+            if let IoInitiator::User(_) = local_segment {
+                self.local_cki_tags.push(true);
+            } else {
+                self.local_cki_tags.push(false);
             }
         }
 
@@ -375,8 +423,8 @@ impl BlobCache {
         let read_size = self.read_partial_chunk(
             fd,
             cursor,
-            region.blob_address + region.seg_offset as u64,
-            region.seg_len as usize,
+            region.local_blob_address + region.local_seg_offset as u64,
+            region.local_seg_len as usize,
         )?;
         Ok(read_size)
     }
@@ -388,15 +436,19 @@ impl BlobCache {
     ) -> Result<usize> {
         let continuous_chunks = &region.cki_set;
         let blob_entry = &region.blob_entry;
+
+        let local_continuous_chunks = &region.local_cki_set;
+        let local_blob_entry = &region.local_blob_entry;
         let mut total_read = 0;
 
         for (i, c) in continuous_chunks.iter().enumerate() {
-            let user_offset = if i == 0 { region.seg_offset } else { 0 };
+            let lc = &local_continuous_chunks[i];
+            let user_offset = if i == 0 { region.local_seg_offset } else { 0 };
             let size = std::cmp::min(
-                c.decompress_size() - user_offset,
-                region.seg_len - total_read as u32,
+                lc.decompress_size() - user_offset,
+                region.local_seg_len - total_read as u32,
             );
-            total_read += self.read_single_chunk(c, blob_entry, user_offset, size, cursor)?;
+            total_read += self.read_single_chunk(c, lc, blob_entry, local_blob_entry, user_offset, size, cursor)?;
         }
 
         Ok(total_read)
@@ -412,10 +464,10 @@ impl BlobCache {
             // FIXME: Must be write lock?
             let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
             if let Ok((_, _, chunk_map)) = cache_guard
-                .set(&region.blob_entry)
+                .set(&region.local_blob_entry)
                 .map_err(|_| error!("Set cache index error!"))
             {
-                for c in &region.cki_set {
+                for c in &region.local_cki_set {
                     chunk_map.finish(c.as_ref());
                 }
             }
@@ -429,11 +481,25 @@ impl BlobCache {
         let blob_id = &region.blob_entry.blob_id;
         let blob_size = region.blob_len;
         let continuous_chunks = &region.cki_set;
-        let chunk_tags = &region.cki_tags;
-        let blob_entry = &region.blob_entry;
+        // let chunk_tags = &region.cki_tags;
+        // let blob_entry = &region.blob_entry;
 
         debug!("total backend data {}KB", blob_size / 1024);
 
+        // let local_blob_offset = region.local_blob_address;
+        // let local_blob_id = &region.local_blob_entry.blob_id;
+        // let local_blob_size = region.local_blob_len;
+        let local_continuous_chunks = &region.local_cki_set;
+        let local_chunk_tags = &region.local_cki_tags;
+        let local_blob_entry = &region.local_blob_entry;
+
+        for (i, c) in continuous_chunks.iter().enumerate() {
+            let lc = &local_continuous_chunks[i];
+            if c.block_id() != lc.block_id() {
+                info!("not equal!\n");
+            }
+        }
+        
         if !continuous_chunks.is_empty() {
             let mut chunks =
                 self.read_chunks(blob_id, blob_offset, blob_size as usize, &continuous_chunks)?;
@@ -443,16 +509,16 @@ impl BlobCache {
             // don't have to hold blobcache mutex when writing files.
             // But prefetch io is usually limited. So it is low priority.
             let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
-            let (fd, _, chunk_map) = cache_guard.set(blob_entry).map_err(|e| {
+            let (fd, _, chunk_map) = cache_guard.set(local_blob_entry).map_err(|e| {
                 error!("Set chunk map error!");
                 e
             })?;
 
-            let len = continuous_chunks.len();
-            for (i, c) in continuous_chunks.iter().rev().enumerate() {
+            let len = local_continuous_chunks.len();
+            for (i, c) in local_continuous_chunks.iter().rev().enumerate() {
                 // FIXME: What if ready after backend IO completion?
                 let d = Arc::new(DataBuffer::Allocated(chunks.pop().unwrap()));
-                if chunk_tags[len - 1 - i] {
+                if local_chunk_tags[len - 1 - i] {
                     buffer_holder.push(d.clone());
                 }
                 self.delay_persist(fd, &chunk_map, c, d);
@@ -486,7 +552,9 @@ impl BlobCache {
     fn read_single_chunk(
         &self,
         chunk: &Arc<dyn RafsChunkInfo>,
+        local_chunk: &Arc<dyn RafsChunkInfo>,
         blob: &RafsBlobEntry,
+        local_blob: &RafsBlobEntry,
         user_offset: u32,
         size: u32,
         mem_cursor: &mut MemSliceCursor,
@@ -499,14 +567,15 @@ impl BlobCache {
 
         // FIXME: get read lock from here
         let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
-        let (fd, _, ref chunk_map) = cache_guard.set(blob)?;
+        let (fd, _, ref chunk_map) = cache_guard.set(local_blob)?;
 
-        let ck = chunk.as_ref();
+        // let ck = chunk.as_ref();
+        let lck = local_chunk.as_ref();
         let bufs = mem_cursor.inner_slice();
 
         debug!("single bio, blob offset {}", chunk.compress_offset());
 
-        let has_ready = chunk_map.has_ready(ck, false)?;
+        let has_ready = chunk_map.has_ready(lck, false)?;
         let buffer_holder;
 
         drop(cache_guard);
@@ -520,14 +589,14 @@ impl BlobCache {
             && self
                 .read_blobcache_chunk(
                     fd,
-                    chunk.as_ref(),
+                    local_chunk.as_ref(),
                     d.mut_slice(),
                     !has_ready || self.need_validate(),
                 )
                 .is_ok()
         {
             self.metrics.whole_hits.inc();
-            chunk_map.set_ready(chunk.as_ref())?;
+            chunk_map.set_ready(local_chunk.as_ref())?;
             trace!(
                 "recover blob cache {} {} offset {} size {}",
                 chunk.block_id(),
@@ -544,18 +613,18 @@ impl BlobCache {
                     d.mut_slice(),
                     Some(&|raw| {
                         if self.is_compressed {
-                            Self::persist_chunk(true, fd, chunk.as_ref(), raw).unwrap_or_else(
+                            Self::persist_chunk(true, fd, local_chunk.as_ref(), raw).unwrap_or_else(
                                 |e| {
                                     error!(
                                         "Failed in writing compressed blob cache, {},index {}",
                                         e,
-                                        chunk.index()
+                                        local_chunk.index()
                                     );
                                     0
                                 },
                             );
                             chunk_map
-                                .set_ready(chunk.as_ref())
+                                .set_ready(local_chunk.as_ref())
                                 .unwrap_or_else(|e| error!("set ready failed, {}", e));
                         }
                     }),
@@ -564,7 +633,7 @@ impl BlobCache {
                     d = d.try_to_own();
                     buffer_holder = Arc::new(d);
                     let delayed_buffer = buffer_holder.clone();
-                    self.delay_persist(fd, &chunk_map, chunk, delayed_buffer);
+                    self.delay_persist(fd, &chunk_map, local_chunk, delayed_buffer);
                     Ok(buffer_holder.as_ref())
                 } else {
                     Ok(&d)
@@ -572,7 +641,7 @@ impl BlobCache {
             }
             .map_err(|e: std::io::Error|
                 // Thanks to above curly bracket, we can clean tracer up if any of the steps fails.
-                {chunk_map.finish(chunk.as_ref());e})?
+                {chunk_map.finish(local_chunk.as_ref());e})?
         };
 
         let read_size = copyv(
@@ -617,21 +686,24 @@ impl BlobCache {
         // Chunks are concatenated.
         for req in merged_requests {
             debug!("A merged request {:?}", req);
+
             let blob = &req.blob_entry;
+            let local_blob = &req.local_blob_entry;
             let cache_guard = self.cache.read().unwrap();
             // FIXME: Don't open code below snippet.
-            let (fd, _, chunk_map) = match cache_guard.get(blob) {
+            let (fd, _, chunk_map) = match cache_guard.get(local_blob) {
                 Some(entry) => {
                     drop(cache_guard);
                     entry
                 }
                 None => {
                     drop(cache_guard);
-                    self.cache.write().unwrap().set(blob)?
+                    self.cache.write().unwrap().set(local_blob)?
                 }
             };
             for (i, chunk) in req.chunks.iter().enumerate() {
-                let has_ready = chunk_map.has_ready(chunk.as_ref(), true)?;
+                let local_chunk = &req.local_chunks[i];
+                let has_ready = chunk_map.has_ready(local_chunk.as_ref(), true)?;
                 // Hit cache if cache ready
                 // Bios that can directly read from blobcache, no need to validate data integrity.
                 // Move them to a merged request.
@@ -639,36 +711,50 @@ impl BlobCache {
                     // Don't handle internal IO for this region type, skip this chunk.
                     // This should always happens at tailing chunks of the bio list.
                     region_type = RegionType::CachePartialChunks;
-                    if let IoInitiator::User(ref s) = req.chunk_tags[i] {
-                        if !RegionType::joinable(previous_region_type, region_type) {
-                            // Region type changes, gather currently OPEN region and make up a new one.
-                            if let Some(r) = region {
-                                regions.push(r);
+                    if let IoInitiator::User(ref s) = req.chunk_tags[i]{
+                        if let IoInitiator::User(ref ls) = req.local_chunk_tags[i] {
+                            if !RegionType::joinable(previous_region_type, region_type) {
+                                // Region type changes, gather currently OPEN region and make up a new one.
+                                if let Some(r) = region {
+                                    regions.push(r);
+                                }
+                                region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
                             }
-                            region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
+                            // Encounter the same type of item, just enlarge this region.
+                            // A sanity check, rafs layer should always passes continuous region.
+                            if i != 0 && self.compressor() != compress::Algorithm::GZip {
+                                let prior_cki = &req.chunks[i - 1];
+                                assert!(
+                                    chunk.decompress_offset()
+                                        == prior_cki.decompress_offset()
+                                            + prior_cki.decompress_size() as u64
+                                );
+                                let local_prior_cki = &req.local_chunks[i - 1];
+                                assert!(
+                                    local_chunk.decompress_offset()
+                                        == local_prior_cki.decompress_offset()
+                                            + local_prior_cki.decompress_size() as u64
+                                );
+                            }
+                            region
+                                .as_mut()
+                                .unwrap()
+                                .append(
+                                    chunk.decompress_offset(),
+                                    chunk.decompress_size(),
+                                    IoInitiator::User(s.clone()),
+                                    None,
+                                    local_chunk.decompress_offset(),
+                                    local_chunk.decompress_size(),
+                                    IoInitiator::User(ls.clone()),
+                                    None,
+
+                                )
+                                .map_err(|e| einval!(e))?;
                         }
-                        // Encounter the same type of item, just enlarge this region.
-                        // A sanity check, rafs layer should always passes continuous region.
-                        if i != 0 && self.compressor() != compress::Algorithm::GZip {
-                            let prior_cki = &req.chunks[i - 1];
-                            assert!(
-                                chunk.decompress_offset()
-                                    == prior_cki.decompress_offset()
-                                        + prior_cki.decompress_size() as u64
-                            )
-                        }
-                        region
-                            .as_mut()
-                            .unwrap()
-                            .append(
-                                chunk.decompress_offset(),
-                                chunk.decompress_size(),
-                                IoInitiator::User(s.clone()),
-                                None,
-                            )
-                            .map_err(|e| einval!(e))?;
                     }
                     previous_region_type = region_type;
+
                 } else if (self.compressor() != compress::Algorithm::GZip
                     && !blob.with_extended_blob_table()
                     && !has_ready)
@@ -688,28 +774,38 @@ impl BlobCache {
 
                     region_type = RegionType::CacheWholeChunks;
                     if let IoInitiator::User(ref s) = req.chunk_tags[i] {
-                        if !RegionType::joinable(previous_region_type, region_type) {
-                            if let Some(r) = region {
-                                regions.push(r);
-                            } else {
-                                assert!(previous_region_type == RegionType::Init);
+                        if let IoInitiator::User(ref ls) = req.local_chunk_tags[i] {
+                            if !RegionType::joinable(previous_region_type, region_type) {
+                                if let Some(r) = region {
+                                    regions.push(r);
+                                } else {
+                                    assert!(previous_region_type == RegionType::Init);
+                                }
+                                region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
                             }
-                            region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
-                        }
 
-                        region
-                            .as_mut()
-                            .unwrap()
-                            .append(
-                                chunk.decompress_offset(),
-                                chunk.decompress_size(),
-                                IoInitiator::User(s.clone()),
-                                Some(chunk.clone()),
-                            )
-                            .map_err(|e| einval!(e))?;
+                            region
+                                .as_mut()
+                                .unwrap()
+                                .append(
+                                    chunk.decompress_offset(),
+                                    chunk.decompress_size(),
+                                    IoInitiator::User(s.clone()),
+                                    Some(chunk.clone()),
+                                    local_chunk.decompress_offset(),
+                                    local_chunk.decompress_size(),
+                                    IoInitiator::User(ls.clone()),
+                                    Some(local_chunk.clone()),
+                                )
+                                .map_err(|e| einval!(e))?;
+                        }
+                        else {
+                            // On slow path, don't try to handle internal IO.
+                            chunk_map.finish(local_chunk.as_ref()); 
+                        }
                     } else {
                         // On slow path, don't try to handle internal IO.
-                        chunk_map.finish(chunk.as_ref());
+                        chunk_map.finish(local_chunk.as_ref());
                     }
                     // Only user io is accounted.
                     // TODO: If all user IO is satisfied, just return.
@@ -721,7 +817,7 @@ impl BlobCache {
                         if let Some(r) = region {
                             regions.push(r);
                         }
-                        region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
+                        region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
                     }
                     // A sanity check, rafs layer should always pass continuous region.
                     if i != 0 && self.compressor() != compress::Algorithm::GZip {
@@ -730,7 +826,13 @@ impl BlobCache {
                             chunk.decompress_offset()
                                 == prior_cki.decompress_offset()
                                     + prior_cki.decompress_size() as u64
-                        )
+                        );
+                        let local_prior_cki = &req.local_chunks[i - 1];
+                        assert!(
+                            local_chunk.decompress_offset()
+                                == local_prior_cki.decompress_offset()
+                                    + local_prior_cki.decompress_size() as u64
+                        );
                     }
 
                     // Safe since the region must be open.
@@ -740,12 +842,21 @@ impl BlobCache {
                     } else {
                         IoInitiator::Internal(chunk.index(), chunk.compress_offset())
                     };
+                    let local_initiator = if let IoInitiator::User(ref ls) = req.local_chunk_tags[i] {
+                        IoInitiator::User(ls.clone())
+                    } else {
+                        IoInitiator::Internal(local_chunk.index(), local_chunk.compress_offset())
+                    };
 
                     rgn.append(
                         chunk.compress_offset(),
                         chunk.compress_size(),
                         initiator,
                         Some(chunk.clone()),
+                        local_chunk.compress_offset(),
+                        local_chunk.compress_size(),
+                        local_initiator,
+                        Some(local_chunk.clone()),
                     )
                     .map_err(|e| einval!(e))?;
 
@@ -759,6 +870,14 @@ impl BlobCache {
             }
 
             for r in &regions {
+                
+                for (i, c) in r.cki_set.iter().enumerate() {
+                    let lc = &r.local_cki_set[i];
+                    if c.block_id() != lc.block_id() {
+                        info!("not equal");
+                    }
+                }
+
                 total_read += match r.region_type {
                     RegionType::CachePartialChunks => {
                         self.dispatch_region_cache(fd, &mut cursor, r)?
@@ -889,10 +1008,10 @@ impl BlobCache {
 
     fn convert_to_merge_request(continuous_bios: &[&RafsBio]) -> MergedBackendRequest {
         let first = continuous_bios[0];
-        let mut mr = MergedBackendRequest::new(first.chunkinfo.clone(), first.blob.clone(), first);
+        let mut mr = MergedBackendRequest::new(first.chunkinfo.clone(), first.blob.clone(), first.local_chunkinfo.clone(), first.local_blob.clone(), first);
 
         for c in &continuous_bios[1..] {
-            mr.merge_one_chunk(Arc::clone(&c.chunkinfo), c);
+            mr.merge_one_chunk(Arc::clone(&c.chunkinfo),Arc::clone(&c.local_chunkinfo), c);
         }
 
         mr
@@ -903,7 +1022,13 @@ impl BlobCache {
         let cur_cki = &cur.chunkinfo;
         let prior_end = prior_cki.compress_offset() + prior_cki.compress_size() as u64;
         let cur_offset = cur_cki.compress_offset();
-        if prior_end == cur_offset && prior.blob.blob_id == cur.blob.blob_id {
+
+        let local_prior_cki = &prior.local_chunkinfo;
+        let local_cur_cki = &cur.local_chunkinfo;
+        let local_prior_end = local_prior_cki.compress_offset() + local_prior_cki.compress_size() as u64;
+        let local_cur_offset = local_cur_cki.compress_offset();
+        if prior_end == cur_offset && prior.blob.blob_id == cur.blob.blob_id &&
+        local_prior_end == local_cur_offset && prior.local_blob.blob_id == cur.local_blob.blob_id {
             return true;
         }
         false
@@ -1037,7 +1162,19 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     let blob_size = mr.blob_size;
                     let continuous_chunks = &mr.chunks;
                     let blob_id = &mr.blob_entry.blob_id;
+
+                    // let local_blob_offset = mr.local_blob_offset;
+                    let local_blob_size = mr.local_blob_size;
+                    let local_continuous_chunks = &mr.local_chunks;
+                    // let local_blob_id = &mr.local_blob_entry.blob_id;
                     let mut issue_batch: bool;
+
+                    for (i, c) in continuous_chunks.iter().enumerate() {
+                        let lc = &local_continuous_chunks[i];
+                        if c.block_id() != lc.block_id() {
+                            debug!("not equal!\n");
+                        }
+                    }
 
                     trace!(
                         "Merged req id {} req offset {} size {}",
@@ -1060,7 +1197,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         .cache
                         .read()
                         .expect("Expect cache lock not poisoned")
-                        .get(&mr.blob_entry);
+                        .get(&mr.local_blob_entry);
 
                     let (fd, _, chunk_map) = if let Some(be) = ee {
                         be
@@ -1069,7 +1206,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .cache
                             .write()
                             .expect("Expect cache lock not poisoned")
-                            .set(&mr.blob_entry)
+                            .set(&mr.local_blob_entry)
                         {
                             Err(err) => {
                                 error!("{}", err);
@@ -1079,12 +1216,12 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         }
                     };
 
-                    for c in continuous_chunks {
+                    for c in local_continuous_chunks {
                         if chunk_map.has_ready(c.as_ref(), false).unwrap_or_default() {
                             continue;
                         }
 
-                        if !&mr.blob_entry.with_extended_blob_table() {
+                        if !&mr.local_blob_entry.with_extended_blob_table() {
                             // Always validate if chunk's hash is equal to `block_id` by which
                             // blobcache judges if the data is up-to-date.
                             let d_size = c.decompress_size() as usize;
@@ -1112,7 +1249,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     }
 
                     if !issue_batch {
-                        for c in continuous_chunks {
+                        for c in local_continuous_chunks {
                             chunk_map.finish(c.as_ref());
                         }
                         continue 'wait_mr;
@@ -1122,7 +1259,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
                     // We can measure merging possibility by this.
                     blobcache.metrics.prefetch_mr_count.inc();
-                    blobcache.metrics.prefetch_data_amount.add(blob_size as u64);
+                    blobcache.metrics.prefetch_data_amount.add(local_blob_size as u64);
 
                     if let Ok(chunks) = blobcache.read_chunks(
                         blob_id,
@@ -1138,10 +1275,10 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .write()
                             .expect("Expect cache lock not poisoned");
                         if let Ok((fd, _, chunk_map)) = cache_guard
-                            .set(&mr.blob_entry)
+                            .set(&mr.local_blob_entry)
                             .map_err(|_| error!("Set cache index error!"))
                         {
-                            for (i, c) in continuous_chunks.iter().enumerate() {
+                            for (i, c) in local_continuous_chunks.iter().enumerate() {
                                 if !chunk_map.has_ready_nowait(c.as_ref()).unwrap_or_default() {
                                     // Write multiple chunks once
                                     match BlobCache::persist_chunk(
@@ -1166,7 +1303,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     } else {
                         // Before issue a merged backend request, we already mark
                         // them as `OnTrip` inflight.
-                        for c in continuous_chunks.iter().map(|i| i.as_ref()) {
+                        for c in local_continuous_chunks.iter().map(|i| i.as_ref()) {
                             chunk_map.finish(c);
                         }
                     }
