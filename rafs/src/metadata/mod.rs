@@ -557,38 +557,6 @@ impl RafsSuper {
             }
         };
         sb.get_inode(dedup_ino, digest_validate)
-        // if let Some(&(dedup_table_id, dedup_ino)) = self.inode_map.read().unwrap().get(&ino) {
-        //     let graud = self.dedup_superblock.read().unwrap();
-        //     let superblock = graud
-        //         .get(&dedup_table_id)
-        //         .ok_or_else(|| einval!("dedup superblock not found"))?;
-        //     return superblock.get_inode(dedup_ino, digest_validate);
-        // }
-        
-        // let (dedup_table_id, dedup_ino) = self.db.query(inode.get_digest().to_string(), self.table_id, ino)
-        //     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        // self.inode_map.write().unwrap().entry(ino).or_insert((dedup_table_id, dedup_ino));
-
-        // if !self.dedup_superblock.read().unwrap().contains_key(&dedup_table_id) {
-        //     // TODO: temprory path for debug, need to consider GC
-        //     let path = format!("/data00/nydus/boot/{}.boot", dedup_table_id);
-        //     let mut bootstrap = match <dyn RafsIoRead>::from_file(&path) {
-        //         Ok(b) => b,
-        //         Err(e) => {
-        //             return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)));
-        //         }
-        //     };
-        //     let mut sb = DedupSuper::new()?;
-        //     sb.load(&mut bootstrap)?;
-        //     let inode = sb.get_inode(dedup_ino, digest_validate);
-        //     self.dedup_superblock.write().unwrap().entry(dedup_table_id).or_insert(sb);
-        //     return inode;
-        // }
-        // let graud = self.dedup_superblock.read().unwrap();
-        // let superblock = graud
-        //     .get(&dedup_table_id)
-        //     .ok_or_else(|| einval!("dedup superblock not found"))?;
-        // superblock.get_inode(dedup_ino, digest_validate)
     }
 
     fn load_v4v5(&mut self, r: &mut RafsIoReader, sb: &RafsV5SuperBlock) -> Result<()> {
