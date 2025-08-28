@@ -8,11 +8,12 @@ package snapshotter
 
 import (
 	"context"
-	"fmt"
 
+	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/dedupserve"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/signals"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/snapshot"
 )
@@ -28,9 +29,13 @@ func Start(ctx context.Context, cfg config.Config) error {
 		ListeningSocketPath: cfg.Address,
 	}
 
+	ds, err := dedupserve.NewDedupServer(cfg.RootDir)
+	if err != nil {
+		return errors.Wrap(err, "failed to initialize dedupserve")
+	}
 	go func() {
-		if err := startServer("/tmp/nydusmap.sock", stopSignal); err != nil {
-			fmt.Println("Server stopped with error:", err)
+		if err := ds.Serve(stopSignal); err != nil {
+			log.L.WithError(err).Error("dedup server stopped with error")
 		}
 	}()
 

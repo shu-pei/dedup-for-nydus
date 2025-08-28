@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -20,6 +21,7 @@ import (
 const (
 	APISocketFileName   = "api.sock"
 	SharedNydusDaemonID = "shared_daemon"
+	DedupSocketFileName = "dedup.sock"
 )
 
 type NewDaemonOpt func(d *Daemon) error
@@ -29,6 +31,8 @@ type Daemon struct {
 	SnapshotID       string
 	ConfigDir        string
 	SocketDir        string
+	BootDir          string
+	DedupSockDir     string
 	LogDir           string
 	LogLevel         string
 	LogToStdout      bool
@@ -67,6 +71,10 @@ func (d *Daemon) ConfigFile() string {
 	return filepath.Join(d.ConfigDir, "config.json")
 }
 
+func (d *Daemon) DedupSock() string {
+	return filepath.Join(d.DedupSockDir, DedupSocketFileName)
+}
+
 func (d *Daemon) APISock() string {
 	if d.ApiSock != nil {
 		return *d.ApiSock
@@ -95,7 +103,31 @@ func (d *Daemon) SharedMount() error {
 	if err != nil {
 		return err
 	}
-	return client.SharedMount(d.MountPoint(), bootstrap, d.ConfigFile())
+
+	// copy bootstrap to root/boot/SnapshotID/image.boot
+	srcPath := bootstrap
+	dstDir := filepath.Join(d.BootDir, d.SnapshotID)
+	dstPath := filepath.Join(dstDir, filepath.Base(srcPath))
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return err
+	}
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return err
+	}
+
+	return client.SharedMount(d.MountPoint(), bootstrap, d.ConfigFile(), d.DedupSock(), d.SnapshotID)
 }
 
 func (d *Daemon) SharedUmount() error {

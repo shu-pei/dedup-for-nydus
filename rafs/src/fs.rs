@@ -185,7 +185,7 @@ impl TryFrom<&RafsConfig> for PrefetchWorker {
 }
 
 impl Rafs {
-    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
+    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader, snapshot_id: &Option<String>, dedupsock: &Option<String>) -> RafsResult<Self> {
         let mut device_conf = conf.device.clone();
 
         device_conf.cache.cache_validate = conf.digest_validate;
@@ -193,6 +193,11 @@ impl Rafs {
 
         let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
         sb.load(r).map_err(RafsError::FillSuperblock)?;
+        if sb.deduplicate {
+            if let (Some(sid) , Some(sock)) = (snapshot_id, dedupsock) {
+                sb.init(sid, sock).map_err(RafsError::FillSuperblock)?;
+            }
+        } 
 
         let rafs = Rafs {
             id: id.to_string(),

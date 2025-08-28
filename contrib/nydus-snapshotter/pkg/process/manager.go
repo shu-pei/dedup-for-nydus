@@ -10,8 +10,10 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 
@@ -114,6 +116,7 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 	// 		return err
 	// 	}
 	// }
+	//
 	cmd, err := m.buildStartCommand(d)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("failed to create start command for daemon %s", d.ID))
@@ -146,6 +149,29 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 		if err != nil {
 			return nil, err
 		}
+		// copy bootstrap to root/boot/SnapshotID/image.boot
+		srcPath := bootstrap
+		dstDir := filepath.Join(d.BootDir, d.SnapshotID)
+		dstPath := filepath.Join(dstDir, filepath.Base(srcPath))
+		if err := os.MkdirAll(dstDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create directory %s: %w", dstDir, err)
+		}
+		src, err := os.Open(srcPath)
+		if err != nil {
+			return nil, err
+		}
+		defer src.Close()
+
+		dst, err := os.Create(dstPath)
+		if err != nil {
+			return nil, err
+		}
+		defer dst.Close()
+
+		if _, err := io.Copy(dst, src); err != nil {
+			return nil, err
+		}
+
 		args = append(args,
 			"--config",
 			d.ConfigFile(),
@@ -153,6 +179,10 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 			bootstrap,
 			"--mountpoint",
 			d.MountPoint(),
+			"--snapshot-id",
+			d.SnapshotID,
+			"--dedupsock",
+			d.DedupSock(),
 		)
 	} else if m.isOneDaemon() {
 		args = append(args,

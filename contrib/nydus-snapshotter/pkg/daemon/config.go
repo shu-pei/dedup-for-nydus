@@ -52,6 +52,20 @@ func WithSocketDir(dir string) NewDaemonOpt {
 	}
 }
 
+func WithBootDir(dir string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.BootDir = dir
+		return nil
+	}
+}
+
+func WithDedupSockDir(dir string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.DedupSockDir = dir
+		return nil
+	}
+}
+
 func WithLogDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		d.LogDir = filepath.Join(dir, d.ID)

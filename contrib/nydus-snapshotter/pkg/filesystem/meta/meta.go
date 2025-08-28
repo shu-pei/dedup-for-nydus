@@ -28,6 +28,10 @@ func (m FileSystemMeta) ConfigRoot() string {
 	return filepath.Join(m.RootDir, "config")
 }
 
+func (m FileSystemMeta) BootRoot() string {
+	return filepath.Join(m.RootDir, "boot")
+}
+
 func (m FileSystemMeta) UpperPath(id string) string {
 	return filepath.Join(m.RootDir, "snapshots", id, "fs")
 }

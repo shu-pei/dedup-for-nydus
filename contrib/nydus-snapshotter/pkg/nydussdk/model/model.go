@@ -26,16 +26,20 @@ type ErrorMessage struct {
 }
 
 type MountRequest struct {
-	FsType string `json:"fs_type"`
-	Source string `json:"source"`
-	Config string `json:"config"`
+	FsType     string `json:"fs_type"`
+	Source     string `json:"source"`
+	Config     string `json:"config"`
+	DedupSock  string `json:"dedupsock"`
+	SnapshotID string `json:"snapshot_id"`
 }
 
-func NewMountRequest(source, config string) MountRequest {
+func NewMountRequest(source, config, dedupsock, snapshotid string) MountRequest {
 	return MountRequest{
-		FsType: "rafs",
-		Source: source,
-		Config: config,
+		FsType:     "rafs",
+		Source:     source,
+		Config:     config,
+		DedupSock:  dedupsock,
+		SnapshotID: snapshotid,
 	}
 }
 

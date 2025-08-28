@@ -35,7 +35,7 @@ const (
 
 type Interface interface {
 	CheckStatus() (model.DaemonInfo, error)
-	SharedMount(sharedMountPoint, bootstrap, daemonConfig string) error
+	SharedMount(sharedMountPoint, bootstrap, daemonConfig, dedupsock, snapshotid string) error
 	Umount(sharedMountPoint string) error
 	GetFsMetric(sharedDaemon bool, sid string) (*model.FsMetric, error)
 }
@@ -120,13 +120,13 @@ func (c *NydusClient) GetFsMetric(sharedDaemon bool, sid string) (*model.FsMetri
 	return &m, nil
 }
 
-func (c *NydusClient) SharedMount(sharedMountPoint, bootstrap, daemonConfig string) error {
+func (c *NydusClient) SharedMount(sharedMountPoint, bootstrap, daemonConfig, dedupsock, snapshotid string) error {
 	requestURL := fmt.Sprintf("http://unix%s?mountpoint=%s", mountEndpoint, sharedMountPoint)
 	content, err := ioutil.ReadFile(daemonConfig)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get content of daemon config %s", daemonConfig)
 	}
-	body, err := json.Marshal(model.NewMountRequest(bootstrap, string(content)))
+	body, err := json.Marshal(model.NewMountRequest(bootstrap, string(content), dedupsock, snapshotid))
 	if err != nil {
 		return errors.Wrap(err, "failed to create mount request")
 	}

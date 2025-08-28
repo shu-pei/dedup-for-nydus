@@ -254,6 +254,8 @@ impl ApiServer {
                 mountpoint,
                 config: cmd.config,
                 source: cmd.source,
+                snapshot_id: Some(cmd.snapshot_id),
+                dedupsock: Some(cmd.dedupsock),
                 prefetch_files: cmd.prefetch_files,
             })
             .map(|_| ApiResponsePayload::Empty)
@@ -269,6 +271,8 @@ impl ApiServer {
                 mountpoint,
                 config: cmd.config,
                 source: cmd.source,
+                snapshot_id: Some(cmd.snapshot_id),
+                dedupsock: Some(cmd.dedupsock),
                 prefetch_files: cmd.prefetch_files,
             })
             .map(|_| ApiResponsePayload::Empty)

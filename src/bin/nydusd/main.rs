@@ -163,6 +163,20 @@ fn main() -> Result<()> {
                 .global(true),
         )
         .arg(
+            Arg::with_name("snapshot-id")
+                .long("snapshot-id")           // --snapshot-id
+                .help("Optional snapshot ID") 
+                .takes_value(true) 
+                .required(false)
+        )
+        .arg(
+            Arg::with_name("dedupsock")
+                .long("dedupsock")           // --dedupsock
+                .help("Optional dedupsock") 
+                .takes_value(true) 
+                .required(false)
+        )
+        .arg(
             Arg::with_name("log-file")
                 .long("log-file")
                 .help("Specify the path to log file. If log filename has not extension, the default \".log\" will be added.")
@@ -295,6 +309,7 @@ fn main() -> Result<()> {
     let virtual_mnt = cmd_arguments_parsed.value_of("virtual-mountpoint").unwrap();
     // apisock means admin api socket support
     let apisock = cmd_arguments_parsed.value_of("apisock");
+
     let rlimit_nofile_default = get_default_rlimit_nofile()?;
     let rlimit_nofile: rlim = cmd_arguments_parsed
         .value_of("rlimit-nofile")
@@ -315,6 +330,8 @@ fn main() -> Result<()> {
         let cmd = FsBackendMountCmd {
             fs_type: FsBackendType::PassthroughFs,
             source: shared_dir.to_string(),
+            snapshot_id: None,
+            dedupsock: None,
             config: "".to_string(),
             mountpoint: virtual_mnt.to_string(),
             prefetch_files: None,
@@ -326,6 +343,8 @@ fn main() -> Result<()> {
             DaemonError::InvalidArguments("config file is not provided".to_string())
         })?;
 
+        let d = cmd_arguments_parsed.value_of("snapshot-id");
+        let sock = cmd_arguments_parsed.value_of("dedupsock");
         let prefetch_files: Option<Vec<String>> = cmd_arguments_parsed
             .values_of("prefetch-files")
             .map(|files| files.map(|s| s.to_string()).collect());
@@ -333,6 +352,8 @@ fn main() -> Result<()> {
         let cmd = FsBackendMountCmd {
             fs_type: FsBackendType::Rafs,
             source: b.to_string(),
+            snapshot_id: d.map(|s| s.to_string()),
+            dedupsock: sock.map(|s| s.to_string()),
             config: std::fs::read_to_string(config)?,
             mountpoint: virtual_mnt.to_string(),
             prefetch_files,

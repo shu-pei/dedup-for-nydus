@@ -350,6 +350,8 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithConfigDir(fs.ConfigRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
+		daemon.WithBootDir(fs.BootRoot()),
+		daemon.WithDedupSockDir(fs.RootDir),
 		daemon.WithLogDir(fs.logDir),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),

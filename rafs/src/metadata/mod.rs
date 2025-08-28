@@ -14,7 +14,6 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use std::fs;
 use std::any::Any;
 
 use serde::Serialize;
@@ -28,7 +27,7 @@ use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-use self::database::KeyValueClient;
+use self::database::DedupClient;
 use self::layout::v5::{RafsV5BlobTable, RafsV5PrefetchTable, RafsV5SuperBlock};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopSuperBlock;
@@ -273,6 +272,12 @@ impl DedupSuper {
         Ok(rs)
     }
 
+    pub fn destroy(&mut self) {
+        Arc::get_mut(&mut self.superblock)
+            .expect("Inodes are no longer used.")
+            .destroy();
+    }
+
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         let mut sb = RafsV5SuperBlock::new();
         r.read_exact(sb.as_mut())?;
@@ -343,10 +348,10 @@ impl DedupSuper {
 
 
 pub struct DedupState {
-    pub dedup_superblock: HashMap<u64, Arc<DedupSuper>>,
-    pub inode_map: HashMap<u64, (u64, u64)>,
-    pub table_id: u64,
-    pub db: KeyValueClient,
+    pub dedup_superblock: HashMap<String, Arc<DedupSuper>>,
+    pub inode_map: HashMap<u64, (String, u64)>,
+    pub id: String,
+    pub dc: Option<DedupClient>,
 }
 
 impl Default for DedupState {
@@ -354,54 +359,104 @@ impl Default for DedupState {
         Self {
             dedup_superblock: HashMap::new(),
             inode_map: HashMap::new(),
-            table_id: 0,
-            db: KeyValueClient::new("/tmp/nydusmap.sock")
-                .expect("failed to connect to KeyValue server"),
+            id: String::new(),
+            dc: None,
         }
     }
 }
 
 impl DedupState {
-    pub fn init(&mut self) -> Result<()> {
-        // Todo: temporary path for debug, need to consider GC
-        self.table_id = self.db.get_id()?;
-        let old_path = format!("/data00/nydus/boot/image.boot");            
-        let new_path = format!("/data00/nydus/boot/{}.boot", self.table_id);
-        fs::rename(&old_path, &new_path)?;
-
-        Ok(())
-    }
-
     pub fn get(&self, ino: u64) -> Option<(Arc<DedupSuper>, u64)> {
-        if let Some(&(dedup_table_id, dedup_ino)) = self.inode_map.get(&ino) {
-            if let Some(superblock) = self.dedup_superblock.get(&dedup_table_id) {
-                return Some((superblock.clone(), dedup_ino));
+        if let Some((dedup_table_id, dedup_ino)) = self.inode_map.get(&ino) {
+            if let Some(superblock) = self.dedup_superblock.get(dedup_table_id) {
+                return Some((superblock.clone(), *dedup_ino));
             }
         }
         None
     }
 
-    pub fn set(&mut self, ino: u64, ino_id: String) -> Result<(Arc<DedupSuper>, u64)> {
-        let db = &self.db;
-        let (dedup_table_id, dedup_ino) = db.query(&ino_id, self.table_id, ino)?;
-        self.inode_map.insert(ino, (dedup_table_id, dedup_ino));
-        if !self.dedup_superblock.contains_key(&dedup_table_id) {
-            // TODO: temprory path for debug, need to consider GC
-            let path = format!("/data00/nydus/boot/{}.boot", dedup_table_id);
-            let mut bootstrap = match <dyn RafsIoRead>::from_file(&path) {
-                Ok(b) => b,
+    pub fn set(&mut self, ino: u64, digest: String) -> Option<(Arc<DedupSuper>, u64)> {
+        if let Some((dedup_table_id, dedup_ino)) = self.inode_map.get(&ino) {
+            if dedup_table_id == &self.id {
+                return None;
+            }
+            if let Some(superblock) = self.dedup_superblock.get(dedup_table_id) {
+                return Some((superblock.clone(), *dedup_ino));
+            }
+        }
+
+        if let Some(dc) = &self.dc {
+            debug!("set info ino is {}, digest is {}\n", ino, digest);
+            let resp= match dc.query(digest.clone(), self.id.clone(), ino) {
+                Ok(r) => r,
                 Err(e) => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)));
+                    warn!("dc.query failed for ino {}: {}", ino, e);
+                    if dc.reconnect().is_err() {
+                        return None;
+                    }
+                    // retry
+                    match dc.query(digest.clone(), self.id.clone(), ino) {
+                        Ok(r) => r,
+                        Err(e2) => {
+                            warn!("dc.query retry failed for ino {}: {}", ino, e2);
+                            return None;
+                        }
+                    }
                 }
             };
-            let mut sb = DedupSuper::new()?;
-            sb.load(&mut bootstrap)?;
-            self.dedup_superblock.insert(dedup_table_id,Arc::new(sb));
+
+            self.inode_map.insert(ino, (resp.id.clone(), resp.ino));
+
+            if resp.id == self.id {
+                return None;
+            }
+
+            if !self.dedup_superblock.contains_key(&resp.id) {
+                let path = match dc.getbs(resp.id.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("dc.getbs failed for id {}: {}", resp.id, e);
+                        if dc.reconnect().is_err() {
+                            return None;
+                        }
+                        //retry
+                        match dc.getbs(resp.id.clone()) {
+                            Ok(r) => r,
+                            Err(e2) => {
+                                warn!("dc.getbs retry failed for ino {}: {}", ino, e2);
+                                return None;
+                            }
+                        }
+                    }
+                };
+                debug!("bootstrap path is {}\n", path.bootstrap);
+
+                let mut bootstrap = match <dyn RafsIoRead>::from_file(&path.bootstrap) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!("open bootstrap {} failed: {:?}", path.bootstrap, e);
+                        return None;
+                    }
+                };
+                let mut sb = DedupSuper::new().ok()?;
+                sb.load(&mut bootstrap).ok()?;
+                self.dedup_superblock.insert(resp.id.clone(),Arc::new(sb));
+            }
+            let superblock = self.dedup_superblock
+                .get(&resp.id)?;
+            Some((superblock.clone(), resp.ino))
+        } else {
+            None
         }
-        let superblock = self.dedup_superblock
-            .get(&dedup_table_id)
-            .ok_or_else(|| einval!("dedup superblock not found"))?;
-        Ok((superblock.clone(), dedup_ino))
+    }
+
+    pub fn destroy(&mut self) {
+        for (_key, ds_arc) in self.dedup_superblock.iter_mut() {
+            Arc::get_mut(ds_arc)
+                .expect("DedupSuper is no longer used.")
+                .destroy();
+        }
+        self.dedup_superblock.clear();
     }
 }
 
@@ -448,16 +503,27 @@ impl RafsSuper {
 
         rs.validate_digest = conf.digest_validate;
         rs.deduplicate = conf.deduplicate;
-        if rs.deduplicate {                      
-            rs.dedup.write().unwrap().init()?;
-        }
         Ok(rs)
+    }
+
+    pub fn init(&mut self, snapshot_id: &String, dedupsock: &String) -> Result<()>{
+        info!("dedup info: snapshot_id is {}, dedupsock is {}\n", snapshot_id, dedupsock);
+        let mut dedup = self.dedup.write().unwrap();
+        dedup.id = snapshot_id.clone();
+        dedup.dc = Some(DedupClient::new(dedupsock)?);
+        Ok(())
     }
 
     pub fn destroy(&mut self) {
         Arc::get_mut(&mut self.superblock)
             .expect("Inodes are no longer used.")
             .destroy();
+
+        Arc::get_mut(&mut self.dedup)
+            .expect("Inodes are no longer used.")
+            .write()
+            .unwrap()
+            .destroy();    
     }
 
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
@@ -546,14 +612,17 @@ impl RafsSuper {
         if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
             return Ok(inode);
         }
-        
+
         let (sb, dedup_ino) = {
             let guard = self.dedup.read().unwrap();
             if let Some((sb, dedup_ino)) = guard.get(ino) {
                 (sb.clone(), dedup_ino)
             } else {
                 drop(guard);
-                self.dedup.write().unwrap().set(ino, inode.get_digest().to_string())?
+                match self.dedup.write().unwrap().set(ino, inode.get_digest().to_string()) {
+                    Some(r) => r,
+                    None => return Ok(inode),
+                }
             }
         };
         sb.get_inode(dedup_ino, digest_validate)

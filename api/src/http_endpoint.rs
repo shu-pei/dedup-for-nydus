@@ -108,6 +108,8 @@ pub enum ApiRequest {
 #[derive(Clone, Deserialize, Debug)]
 pub struct ApiMountCmd {
     pub source: String,
+    pub dedupsock: String,
+    pub snapshot_id: String,
     #[serde(default)]
     pub fs_type: String,
     pub config: String,
