@@ -307,12 +307,34 @@ impl RafsBio {
         }
     }
 
-    pub fn update(
-        &mut self,
+    pub fn new_with_dedup(
         chunkinfo: Arc<dyn RafsChunkInfo>,
-        blob: Arc<RafsBlobEntry>
-    ) {
-        self.local_chunkinfo = chunkinfo;
-        self.local_blob = blob;
+        blob: Arc<RafsBlobEntry>,
+        local_chunkinfo: Arc<dyn RafsChunkInfo>,
+        local_blob: Arc<RafsBlobEntry>,
+        offset: u32,
+        size: usize,
+        blksize: u32,
+        user_io: bool,
+    ) -> Self {
+        RafsBio {
+            chunkinfo,
+            blob,
+            offset,
+            size,
+            blksize,
+            user_io,
+            local_chunkinfo,
+            local_blob,
+        }
     }
+
+    // pub fn update(
+    //     &mut self,
+    //     chunkinfo: Arc<dyn RafsChunkInfo>,
+    //     blob: Arc<RafsBlobEntry>
+    // ) {
+    //     self.local_chunkinfo = chunkinfo;
+    //     self.local_blob = blob;
+    // }
 }

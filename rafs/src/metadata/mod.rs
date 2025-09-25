@@ -366,71 +366,49 @@ impl Default for DedupState {
 }
 
 impl DedupState {
-    pub fn get(&self, ino: u64) -> Option<(Arc<DedupSuper>, u64)> {
-        if let Some((dedup_table_id, dedup_ino)) = self.inode_map.get(&ino) {
-            if let Some(superblock) = self.dedup_superblock.get(dedup_table_id) {
-                return Some((superblock.clone(), *dedup_ino));
-            }
+    pub fn get_inode_map(&self, ino: u64) -> Option<(String, u64)> {
+        if let Some((table_id, table_ino)) = self.inode_map.get(&ino) {
+            Some((table_id.clone(), *table_ino))
+        } else {
+            None
         }
-        None
+    } 
+
+    pub fn is_same(&self, id: &String) -> bool {
+        if *id == self.id {
+            return true;
+        } else {
+            return false;
+        }
     }
 
-    pub fn set(&mut self, ino: u64, digest: String) -> Option<(Arc<DedupSuper>, u64)> {
-        if let Some((dedup_table_id, dedup_ino)) = self.inode_map.get(&ino) {
-            if dedup_table_id == &self.id {
-                return None;
-            }
-            if let Some(superblock) = self.dedup_superblock.get(dedup_table_id) {
-                return Some((superblock.clone(), *dedup_ino));
-            }
-        }
+    pub fn get(&self, table_id: &String) -> Option<Arc<DedupSuper>> {
+        self.dedup_superblock.get(table_id).cloned()
+    }
 
+    pub fn set(&mut self, ino: u64, digest: &String) -> Option<(Arc<DedupSuper>, u64)> {
         if let Some(dc) = &self.dc {
-            debug!("set info ino is {}, digest is {}\n", ino, digest);
-            let resp= match dc.query(digest.clone(), self.id.clone(), ino) {
+            let resp= match dc.query(&digest, &self.id, ino) {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("dc.query failed for ino {}: {}", ino, e);
-                    if dc.reconnect().is_err() {
-                        return None;
-                    }
-                    // retry
-                    match dc.query(digest.clone(), self.id.clone(), ino) {
-                        Ok(r) => r,
-                        Err(e2) => {
-                            warn!("dc.query retry failed for ino {}: {}", ino, e2);
-                            return None;
-                        }
-                    }
+                    warn!("query dedup info failed: {:?}", e);
+                    return None;
                 }
             };
 
             self.inode_map.insert(ino, (resp.id.clone(), resp.ino));
-
             if resp.id == self.id {
                 return None;
             }
 
             if !self.dedup_superblock.contains_key(&resp.id) {
-                let path = match dc.getbs(resp.id.clone()) {
+                let path = match dc.getbs(&resp.id) {
                     Ok(p) => p,
                     Err(e) => {
-                        warn!("dc.getbs failed for id {}: {}", resp.id, e);
-                        if dc.reconnect().is_err() {
-                            return None;
-                        }
-                        //retry
-                        match dc.getbs(resp.id.clone()) {
-                            Ok(r) => r,
-                            Err(e2) => {
-                                warn!("dc.getbs retry failed for ino {}: {}", ino, e2);
-                                return None;
-                            }
-                        }
+                        warn!("query dedup bootstrap path failed: {:?}", e);
+                        return None;
                     }
                 };
-                debug!("bootstrap path is {}\n", path.bootstrap);
-
                 let mut bootstrap = match <dyn RafsIoRead>::from_file(&path.bootstrap) {
                     Ok(b) => b,
                     Err(e) => {
@@ -438,12 +416,13 @@ impl DedupState {
                         return None;
                     }
                 };
+
                 let mut sb = DedupSuper::new().ok()?;
                 sb.load(&mut bootstrap).ok()?;
-                self.dedup_superblock.insert(resp.id.clone(),Arc::new(sb));
+                self.dedup_superblock.insert(resp.id.clone(), Arc::new(sb));
             }
-            let superblock = self.dedup_superblock
-                .get(&resp.id)?;
+
+            let superblock = self.dedup_superblock.get(&resp.id)?;
             Some((superblock.clone(), resp.ino))
         } else {
             None
@@ -507,7 +486,6 @@ impl RafsSuper {
     }
 
     pub fn init(&mut self, snapshot_id: &String, dedupsock: &String) -> Result<()>{
-        info!("dedup info: snapshot_id is {}, dedupsock is {}\n", snapshot_id, dedupsock);
         let mut dedup = self.dedup.write().unwrap();
         dedup.id = snapshot_id.clone();
         dedup.dc = Some(DedupClient::new(dedupsock)?);
@@ -609,23 +587,21 @@ impl RafsSuper {
     pub fn get_dedup_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
         let inode = self.superblock.get_inode(ino, digest_validate)?;
         // TODO:
-        if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
-            return Ok(inode);
+        let guard = self.dedup.read().unwrap();
+        if let Some((table_id, table_ino)) = guard.get_inode_map(ino){
+            if guard.is_same(&table_id) {
+                return Ok(inode);
+            } else if let Some(ds) = guard.get(&table_id) {
+                return ds.get_inode(table_ino, digest_validate);
+            }
+        } else {
+            drop(guard);
+            if let Some((ds, dedup_ino)) = self.dedup.write().unwrap().set(ino, &inode.get_digest().to_string()) {
+                return ds.get_inode(dedup_ino, digest_validate);
+            }
         }
 
-        let (sb, dedup_ino) = {
-            let guard = self.dedup.read().unwrap();
-            if let Some((sb, dedup_ino)) = guard.get(ino) {
-                (sb.clone(), dedup_ino)
-            } else {
-                drop(guard);
-                match self.dedup.write().unwrap().set(ino, inode.get_digest().to_string()) {
-                    Some(r) => r,
-                    None => return Ok(inode),
-                }
-            }
-        };
-        sb.get_inode(dedup_ino, digest_validate)
+        return Ok(inode);
     }
 
     fn load_v4v5(&mut self, r: &mut RafsIoReader, sb: &RafsV5SuperBlock) -> Result<()> {
@@ -813,8 +789,14 @@ impl RafsSuper {
                                 hardlinks.insert(i.ino());
                             }
                         }
-                        let dedup_inode = self.get_dedup_inode(i.ino(), false)?;
-                        let mut desc = i.alloc_bio_desc_dedup(&dedup_inode, 0, i.size() as usize, false)?;
+
+                        let mut desc = if !self.deduplicate || !i.is_reg() || i.size() < 256 * 1024 {
+                            i.alloc_bio_desc(0, i.size() as usize, false)?
+                        } else {
+                            let dedup_inode = self.get_dedup_inode(i.ino(), false)?;
+                            i.alloc_bio_desc_dedup(&dedup_inode, 0, i.size() as usize, false)?
+                        };
+
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
 
@@ -831,8 +813,14 @@ impl RafsSuper {
                             hardlinks.insert(inode.ino());
                         }
                     }
-                    let dedup_inode = self.get_dedup_inode(inode.ino(), false)?;
-                    let mut desc = inode.alloc_bio_desc_dedup(&dedup_inode, 0, inode.size() as usize, false)?;
+
+                    let mut desc = if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
+                        inode.alloc_bio_desc(0, inode.size() as usize, false)?
+                    } else {
+                        let dedup_inode = self.get_dedup_inode(inode.ino(), false)?;
+                        inode.alloc_bio_desc_dedup(&dedup_inode, 0, inode.size() as usize, false)?
+                    };
+
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
 
@@ -957,9 +945,14 @@ impl RafsSuper {
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
             let ino = inode.ino();
-            let dedup_inode = self.get_dedup_inode(ino, false)?;
-            let mut d = inode.alloc_bio_desc_dedup(&dedup_inode, bound, sz as usize, false)?;
-            
+
+            let mut d = if !self.deduplicate || !inode.is_reg() || inode_size < 256 * 1024 {
+                inode.alloc_bio_desc(bound, sz as usize, false)?
+            } else {
+                let dedup_inode = self.get_dedup_inode(ino, false)?;
+                inode.alloc_bio_desc_dedup(&dedup_inode, bound, sz as usize, false)?
+            };
+
             // It is possible that read size is beyond file size, so chunks vector is zero length.
             if !d.bi_vec.is_empty() {
                 let ck = d.bi_vec[0].chunkinfo.clone();
@@ -1021,11 +1014,9 @@ impl RafsSuper {
 
         if extra_file_needed {
             let mut next_ino = inode.ino() + 1;
-            
             loop {
                 let next_inode = self.get_inode(next_ino, false);
-                let dedup_inode = self.get_dedup_inode(next_ino, false);
-                if let (Ok(ni), Ok(di)) = (next_inode, dedup_inode) {
+                if let Ok(ni)= next_inode{
                     if !ni.is_reg() {
                         next_ino = ni.ino() + 1;
                         continue;
@@ -1037,7 +1028,12 @@ impl RafsSuper {
                         break;
                     }
 
-                    let mut d = ni.alloc_bio_desc_dedup(&di, 0, sz as usize, false)?;
+                    let mut d = if !self.deduplicate || next_size < 256 * 1024 {
+                        ni.alloc_bio_desc(0, sz as usize, false)?
+                    } else {
+                        let di = self.get_dedup_inode(next_ino, false)?;
+                        ni.alloc_bio_desc_dedup(&di, 0, sz as usize, false)?
+                    };
 
                     if d.bi_vec.is_empty() {
                         warn!("A desc has no chunks appended");

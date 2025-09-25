@@ -132,13 +132,13 @@ func (s *dedupserve) handleConn(conn net.Conn) error {
 			val := QueryResponse{Id: req.Id, Ino: req.Ino}
 			s.data.Store(req.Key, val)
 
-			_, err := s.db.Exec(
-				"INSERT OR REPLACE INTO dedup_data (key, id, ino) VALUES (?, ?, ?)",
-				req.Key, req.Id, req.Ino,
-			)
-			if err != nil {
-				log.L.WithError(err).Error("failed to persist data")
-			}
+			// _, err := s.db.Exec(
+			// 	"INSERT OR REPLACE INTO dedup_data (key, id, ino) VALUES (?, ?, ?)",
+			// 	req.Key, req.Id, req.Ino,
+			// )
+			// if err != nil {
+			// 	log.L.WithError(err).Error("failed to persist data")
+			// }
 
 			_ = encoder.Encode(val)
 

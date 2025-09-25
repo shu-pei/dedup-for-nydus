@@ -625,23 +625,21 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
-        info!("begin read\n");
         let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
         if offset >= inode.size() {
             recorder.mark_success(0);
             return Ok(0);
         }
-        let dedup_inode = self.sb.get_dedup_inode(ino, false)?;
-        let mut desc = inode.alloc_bio_desc_dedup(&dedup_inode, offset, size as usize, true)?;
+
+        let mut desc= if !self.sb.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
+            inode.alloc_bio_desc(offset, size as usize, true)?
+        } else {
+            let dedup_inode = self.sb.get_dedup_inode(ino, false)?;
+            inode.alloc_bio_desc_dedup(&dedup_inode, offset, size as usize, true)?
+        };
+
         let mut all_cached = true;
-
-        for bio in &desc.bi_vec {
-            if bio.chunkinfo.block_id() != bio.local_chunkinfo.block_id() {
-                info!("unequal\n");
-            }
-        }
-
         if self.amplify_io != 0 {
             if let Some(d) = self.amplify_io.checked_sub(size) {
                 for b in &desc.bi_vec {
@@ -673,7 +671,6 @@ impl FileSystem for Rafs {
             recorder.mark_success(r);
             r
         });
-        info!("end read\n");
         self.ios.latency_end(&start, Read);
         r
     }

@@ -55,8 +55,8 @@ struct MergedBackendRequest {
     pub blob_size: u32,
     pub blob_entry: Arc<RafsBlobEntry>,
 
+    // local chunks are continuous for dedup 
     pub local_chunks: Vec<Arc<dyn RafsChunkInfo>>,
-    pub local_chunk_tags: Vec<IoInitiator>,
     pub local_blob_offset: u64,
     pub local_blob_size: u32,
     pub local_blob_entry: Arc<RafsBlobEntry>,
@@ -91,19 +91,10 @@ impl MergedBackendRequest {
         tags.push(tag);
 
         let mut local_chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
-        let mut local_tags: Vec<IoInitiator> = Vec::new();
         let local_blob_size = local_first_cki.compress_size();
         let local_blob_offset = local_first_cki.compress_offset();
 
-        let local_tag = if bio.user_io {
-            IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
-        } else {
-            IoInitiator::Internal(local_first_cki.index(), local_first_cki.compress_offset())
-        };
-
         local_chunks.push(local_first_cki);
-
-        local_tags.push(local_tag);
 
         MergedBackendRequest {
             blob_offset,
@@ -115,7 +106,6 @@ impl MergedBackendRequest {
             local_blob_offset,
             local_blob_size,
             local_chunks,
-            local_chunk_tags: local_tags,
             local_blob_entry: local_blob,
         }
     }
@@ -133,13 +123,7 @@ impl MergedBackendRequest {
         self.chunk_tags.push(tag);
 
         self.local_blob_size += local_cki.compress_size();
-        let local_tag = if bio.user_io {
-            IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
-        } else {
-            IoInitiator::Internal(local_cki.index(), local_cki.compress_offset())
-        };
         self.local_chunks.push(local_cki);
-        self.local_chunk_tags.push(local_tag);
     }
 }
 

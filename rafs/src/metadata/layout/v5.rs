@@ -1225,22 +1225,25 @@ fn add_chunk_to_bio_desc_dedup(
     } else {
         0
     };
+
     let chunk_end = if end < (chunk.file_offset() + chunk.decompress_size() as u64) {
         end - chunk.file_offset()
     } else {
         chunk.decompress_size() as u64
     };
 
-    let mut bio = RafsBio::new(
+    let bio = RafsBio::new_with_dedup(
         chunk,
         blob,
+        local_chunk,
+        local_blob,
         chunk_start as u32,
         (chunk_end - chunk_start) as usize,
         blksize,
         user_io,
     );
 
-    bio.update(local_chunk, local_blob);
+   //  bio.update(local_chunk, local_blob);
 
     desc.bi_size += bio.size;
     desc.bi_vec.push(bio);

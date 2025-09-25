@@ -1,7 +1,8 @@
 use std::io::{BufReader, BufRead, Write};
 use std::os::unix::net::UnixStream;
-use serde::{Serialize, Deserialize};
+use std::io::Result;
 use std::sync::{Arc, Mutex};
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct QueryRequest {
@@ -29,54 +30,53 @@ pub struct BootstrapResponse {
 }
 
 pub struct DedupClient {
-    dedupsock: String,
-    stream: Arc<Mutex<UnixStream>>,
+    // dedupsock: String,
+    stream: Arc<Mutex<BufReader<UnixStream>>>,
 }
 
 impl DedupClient {
-    pub fn new(dedupsock: &String) -> std::io::Result<Self> {
+    pub fn new(dedupsock: &String) -> Result<Self> {
         let stream = UnixStream::connect(dedupsock)?;
         Ok(DedupClient {
-            dedupsock: dedupsock.clone(),
-            stream: Arc::new(Mutex::new(stream)),
+            // dedupsock: dedupsock.clone(),
+            stream: Arc::new(Mutex::new(BufReader::new(stream))),
         })
     }
 
-    pub fn reconnect(&self) -> std::io::Result<()> {
-        let new_stream = UnixStream::connect(&self.dedupsock)?;
-        *self.stream.lock().unwrap() = new_stream;
-        Ok(())
-    }
-
-    pub fn query(&self, key: String, id: String, ino: u64) -> std::io::Result<QueryResponse> {
-        let req = QueryRequest { kind: "query".to_string(), key, id, ino };
+    pub fn query(&self, key: &String, id: &String, ino: u64) -> Result<QueryResponse> {
+        let req = QueryRequest {
+            kind: "query".to_string(),
+            key: key.clone(),
+            id: id.clone(),
+            ino
+        };
         let req_json = serde_json::to_string(&req)?;
         let mut stream = self.stream.lock().unwrap();
-        stream.write_all(req_json.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
 
-        let mut reader = BufReader::new(stream.try_clone()?);
+        stream.get_mut().write_all(req_json.as_bytes())?;
+        stream.get_mut().write_all(b"\n")?;
+        stream.get_mut().flush()?;
+
         let mut line = String::new();
-        reader.read_line(&mut line)?;  
+        stream.read_line(&mut line)?;  
         let resp: QueryResponse = serde_json::from_str(&line)?;
-        debug!("resp is {}, {}\n", resp.id, resp.ino);
         Ok(resp)
     }
 
-    pub fn getbs(&self, id: String) -> std::io::Result<BootstrapResponse> {
-        let req = BootstrapRequest { kind: "getbs".to_string(), id };
+    pub fn getbs(&self, id: &String) -> Result<BootstrapResponse> {
+        let req = BootstrapRequest {
+            kind: "getbs".to_string(),
+            id: id.clone()
+        };
         let req_json = serde_json::to_string(&req)?;
         let mut stream = self.stream.lock().unwrap();
-        stream.write_all(req_json.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
+        stream.get_mut().write_all(req_json.as_bytes())?;
+        stream.get_mut().write_all(b"\n")?;
+        stream.get_mut().flush()?;
 
-        let mut reader = BufReader::new(stream.try_clone()?);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        stream.read_line(&mut line)?;
         let resp: BootstrapResponse = serde_json::from_str(&line)?;
-        debug!("resp is {}\n", resp.bootstrap);
         Ok(resp)
     }
 }

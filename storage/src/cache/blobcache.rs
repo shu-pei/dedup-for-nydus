@@ -251,10 +251,10 @@ struct RequestRegion {
 
     pub local_blob_address: u64,
     pub local_blob_len: u32,
-    pub local_seg_offset: u32,
-    pub local_seg_len: u32,
+    // pub local_seg_offset: u32,
+    // pub local_seg_len: u32,
     pub local_cki_set: Vec<Arc<dyn RafsChunkInfo>>,
-    pub local_cki_tags: Vec<bool>,
+    // pub local_cki_tags: Vec<bool>,
     local_blob_entry: Arc<RafsBlobEntry>,
 }
 
@@ -275,10 +275,10 @@ impl RequestRegion {
 
             local_blob_address: 0,
             local_blob_len: 0,
-            local_seg_offset: 0,
-            local_seg_len: 0,
+            // local_seg_offset: 0,
+            // local_seg_len: 0,
             local_cki_set: Vec::new(),
-            local_cki_tags: Vec::new(),
+            // local_cki_tags: Vec::new(),
             local_blob_entry
         }
     }
@@ -291,7 +291,6 @@ impl RequestRegion {
         cki: Option<Arc<dyn RafsChunkInfo>>,
         local_start: u64,
         local_len: u32,
-        local_segment: IoInitiator,
         local_cki: Option<Arc<dyn RafsChunkInfo>>,
     ) -> StorageResult<()> {
         if self.status == RequestRegionStatus::Open
@@ -303,19 +302,12 @@ impl RequestRegion {
 
         if !self.user_appended {
             if let IoInitiator::User(ref s) = segment {
-                if let IoInitiator::User(ref ls) = local_segment {
-                    self.seg_offset = s.offset;
-                    self.seg_len = s.len;
-                    self.local_seg_offset = ls.offset;
-                    self.local_seg_len = ls.len;
-                    self.user_appended = true;
-                }
+                self.seg_offset = s.offset;
+                self.seg_len = s.len;
+                self.user_appended = true;
             }
         } else if let IoInitiator::User(ref s) = segment {
-            if let IoInitiator::User(ref ls) = local_segment {
-                self.seg_len += s.len;
-                self.local_seg_len += ls.len;
-            }
+            self.seg_len += s.len;
         }
 
         if self.status == RequestRegionStatus::Init {
@@ -334,13 +326,8 @@ impl RequestRegion {
                     self.cki_tags.push(false);
                 }
             }
-            if let Some(c) = local_cki {
-                self.local_cki_set.push(c);
-                if let IoInitiator::User(_) = local_segment {
-                    self.local_cki_tags.push(true);
-                } else {
-                    self.local_cki_tags.push(false);
-                }
+            if let Some(lc) = local_cki {
+                self.local_cki_set.push(lc);
             }
             return Ok(());
         }
@@ -358,15 +345,9 @@ impl RequestRegion {
                 self.cki_tags.push(false);
             }
         }
-        if let Some(c) = local_cki {
-            self.local_cki_set.push(c);
-            if let IoInitiator::User(_) = local_segment {
-                self.local_cki_tags.push(true);
-            } else {
-                self.local_cki_tags.push(false);
-            }
+        if let Some(lc) = local_cki {
+            self.local_cki_set.push(lc);
         }
-
         Ok(())
     }
 
@@ -423,8 +404,8 @@ impl BlobCache {
         let read_size = self.read_partial_chunk(
             fd,
             cursor,
-            region.local_blob_address + region.local_seg_offset as u64,
-            region.local_seg_len as usize,
+            region.local_blob_address + region.seg_offset as u64,
+            region.seg_len as usize,
         )?;
         Ok(read_size)
     }
@@ -443,10 +424,10 @@ impl BlobCache {
 
         for (i, c) in continuous_chunks.iter().enumerate() {
             let lc = &local_continuous_chunks[i];
-            let user_offset = if i == 0 { region.local_seg_offset } else { 0 };
+            let user_offset = if i == 0 { region.seg_offset } else { 0 };
             let size = std::cmp::min(
                 lc.decompress_size() - user_offset,
-                region.local_seg_len - total_read as u32,
+                region.seg_len - total_read as u32,
             );
             total_read += self.read_single_chunk(c, lc, blob_entry, local_blob_entry, user_offset, size, cursor)?;
         }
@@ -467,8 +448,8 @@ impl BlobCache {
                 .set(&region.local_blob_entry)
                 .map_err(|_| error!("Set cache index error!"))
             {
-                for c in &region.local_cki_set {
-                    chunk_map.finish(c.as_ref());
+                for lc in &region.local_cki_set {
+                    chunk_map.finish(lc.as_ref());
                 }
             }
 
@@ -481,24 +462,12 @@ impl BlobCache {
         let blob_id = &region.blob_entry.blob_id;
         let blob_size = region.blob_len;
         let continuous_chunks = &region.cki_set;
-        // let chunk_tags = &region.cki_tags;
-        // let blob_entry = &region.blob_entry;
+        let chunk_tags = &region.cki_tags;
 
         debug!("total backend data {}KB", blob_size / 1024);
 
-        // let local_blob_offset = region.local_blob_address;
-        // let local_blob_id = &region.local_blob_entry.blob_id;
-        // let local_blob_size = region.local_blob_len;
         let local_continuous_chunks = &region.local_cki_set;
-        let local_chunk_tags = &region.local_cki_tags;
         let local_blob_entry = &region.local_blob_entry;
-
-        for (i, c) in continuous_chunks.iter().enumerate() {
-            let lc = &local_continuous_chunks[i];
-            if c.block_id() != lc.block_id() {
-                info!("not equal!\n");
-            }
-        }
         
         if !continuous_chunks.is_empty() {
             let mut chunks =
@@ -518,7 +487,7 @@ impl BlobCache {
             for (i, c) in local_continuous_chunks.iter().rev().enumerate() {
                 // FIXME: What if ready after backend IO completion?
                 let d = Arc::new(DataBuffer::Allocated(chunks.pop().unwrap()));
-                if local_chunk_tags[len - 1 - i] {
+                if chunk_tags[len - 1 - i] {
                     buffer_holder.push(d.clone());
                 }
                 self.delay_persist(fd, &chunk_map, c, d);
@@ -569,11 +538,10 @@ impl BlobCache {
         let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
         let (fd, _, ref chunk_map) = cache_guard.set(local_blob)?;
 
-        // let ck = chunk.as_ref();
         let lck = local_chunk.as_ref();
         let bufs = mem_cursor.inner_slice();
 
-        debug!("single bio, blob offset {}", chunk.compress_offset());
+        debug!("single bio, blob offset {}", local_chunk.compress_offset());
 
         let has_ready = chunk_map.has_ready(lck, false)?;
         let buffer_holder;
@@ -712,46 +680,43 @@ impl BlobCache {
                     // This should always happens at tailing chunks of the bio list.
                     region_type = RegionType::CachePartialChunks;
                     if let IoInitiator::User(ref s) = req.chunk_tags[i]{
-                        if let IoInitiator::User(ref ls) = req.local_chunk_tags[i] {
-                            if !RegionType::joinable(previous_region_type, region_type) {
-                                // Region type changes, gather currently OPEN region and make up a new one.
-                                if let Some(r) = region {
-                                    regions.push(r);
-                                }
-                                region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
+                        if !RegionType::joinable(previous_region_type, region_type) {
+                            // Region type changes, gather currently OPEN region and make up a new one.
+                            if let Some(r) = region {
+                                regions.push(r);
                             }
-                            // Encounter the same type of item, just enlarge this region.
-                            // A sanity check, rafs layer should always passes continuous region.
-                            if i != 0 && self.compressor() != compress::Algorithm::GZip {
-                                let prior_cki = &req.chunks[i - 1];
-                                assert!(
-                                    chunk.decompress_offset()
-                                        == prior_cki.decompress_offset()
-                                            + prior_cki.decompress_size() as u64
-                                );
-                                let local_prior_cki = &req.local_chunks[i - 1];
-                                assert!(
-                                    local_chunk.decompress_offset()
-                                        == local_prior_cki.decompress_offset()
-                                            + local_prior_cki.decompress_size() as u64
-                                );
-                            }
-                            region
-                                .as_mut()
-                                .unwrap()
-                                .append(
-                                    chunk.decompress_offset(),
-                                    chunk.decompress_size(),
-                                    IoInitiator::User(s.clone()),
-                                    None,
-                                    local_chunk.decompress_offset(),
-                                    local_chunk.decompress_size(),
-                                    IoInitiator::User(ls.clone()),
-                                    None,
-
-                                )
-                                .map_err(|e| einval!(e))?;
+                            region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
                         }
+                        // Encounter the same type of item, just enlarge this region.
+                        // A sanity check, rafs layer should always passes continuous region.
+                        if i != 0 && self.compressor() != compress::Algorithm::GZip {
+                            let prior_cki = &req.chunks[i - 1];
+                            assert!(
+                                chunk.decompress_offset()
+                                    == prior_cki.decompress_offset()
+                                        + prior_cki.decompress_size() as u64
+                            );
+                            let local_prior_cki = &req.local_chunks[i - 1];
+                            assert!(
+                                local_chunk.decompress_offset()
+                                    == local_prior_cki.decompress_offset()
+                                        + local_prior_cki.decompress_size() as u64
+                            );
+                        }
+                        region
+                            .as_mut()
+                            .unwrap()
+                            .append(
+                                chunk.decompress_offset(),
+                                chunk.decompress_size(),
+                                IoInitiator::User(s.clone()),
+                                None,
+                                local_chunk.decompress_offset(),
+                                local_chunk.decompress_size(),
+                                None,
+
+                            )
+                            .map_err(|e| einval!(e))?;
                     }
                     previous_region_type = region_type;
 
@@ -774,35 +739,28 @@ impl BlobCache {
 
                     region_type = RegionType::CacheWholeChunks;
                     if let IoInitiator::User(ref s) = req.chunk_tags[i] {
-                        if let IoInitiator::User(ref ls) = req.local_chunk_tags[i] {
-                            if !RegionType::joinable(previous_region_type, region_type) {
-                                if let Some(r) = region {
-                                    regions.push(r);
-                                } else {
-                                    assert!(previous_region_type == RegionType::Init);
-                                }
-                                region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
+                        if !RegionType::joinable(previous_region_type, region_type) {
+                            if let Some(r) = region {
+                                regions.push(r);
+                            } else {
+                                assert!(previous_region_type == RegionType::Init);
                             }
+                            region = Some(RequestRegion::new(region_type, req.blob_entry.clone(), req.local_blob_entry.clone()));
+                        }
 
-                            region
-                                .as_mut()
-                                .unwrap()
-                                .append(
-                                    chunk.decompress_offset(),
-                                    chunk.decompress_size(),
-                                    IoInitiator::User(s.clone()),
-                                    Some(chunk.clone()),
-                                    local_chunk.decompress_offset(),
-                                    local_chunk.decompress_size(),
-                                    IoInitiator::User(ls.clone()),
-                                    Some(local_chunk.clone()),
-                                )
-                                .map_err(|e| einval!(e))?;
-                        }
-                        else {
-                            // On slow path, don't try to handle internal IO.
-                            chunk_map.finish(local_chunk.as_ref()); 
-                        }
+                        region
+                            .as_mut()
+                            .unwrap()
+                            .append(
+                                chunk.decompress_offset(),
+                                chunk.decompress_size(),
+                                IoInitiator::User(s.clone()),
+                                Some(chunk.clone()),
+                                local_chunk.decompress_offset(),
+                                local_chunk.decompress_size(),
+                                Some(local_chunk.clone()),
+                            )
+                            .map_err(|e| einval!(e))?;
                     } else {
                         // On slow path, don't try to handle internal IO.
                         chunk_map.finish(local_chunk.as_ref());
@@ -842,11 +800,6 @@ impl BlobCache {
                     } else {
                         IoInitiator::Internal(chunk.index(), chunk.compress_offset())
                     };
-                    let local_initiator = if let IoInitiator::User(ref ls) = req.local_chunk_tags[i] {
-                        IoInitiator::User(ls.clone())
-                    } else {
-                        IoInitiator::Internal(local_chunk.index(), local_chunk.compress_offset())
-                    };
 
                     rgn.append(
                         chunk.compress_offset(),
@@ -855,7 +808,6 @@ impl BlobCache {
                         Some(chunk.clone()),
                         local_chunk.compress_offset(),
                         local_chunk.compress_size(),
-                        local_initiator,
                         Some(local_chunk.clone()),
                     )
                     .map_err(|e| einval!(e))?;
@@ -870,14 +822,6 @@ impl BlobCache {
             }
 
             for r in &regions {
-                
-                for (i, c) in r.cki_set.iter().enumerate() {
-                    let lc = &r.local_cki_set[i];
-                    if c.block_id() != lc.block_id() {
-                        info!("not equal");
-                    }
-                }
-
                 total_read += match r.region_type {
                     RegionType::CachePartialChunks => {
                         self.dispatch_region_cache(fd, &mut cursor, r)?
@@ -1168,13 +1112,6 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     let local_continuous_chunks = &mr.local_chunks;
                     // let local_blob_id = &mr.local_blob_entry.blob_id;
                     let mut issue_batch: bool;
-
-                    for (i, c) in continuous_chunks.iter().enumerate() {
-                        let lc = &local_continuous_chunks[i];
-                        if c.block_id() != lc.block_id() {
-                            debug!("not equal!\n");
-                        }
-                    }
 
                     trace!(
                         "Merged req id {} req offset {} size {}",
