@@ -504,7 +504,7 @@ impl RafsInode for CachedInodeV5 {
 
     fn alloc_bio_desc_dedup(
         &self,
-        _dedup_ino: &Arc<dyn RafsInode>,
+        _dedup_ino: &dyn RafsInode,
         _offset: u64,
         _size: usize,
         _user_io: bool,

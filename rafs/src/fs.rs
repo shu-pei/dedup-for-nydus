@@ -632,12 +632,16 @@ impl FileSystem for Rafs {
             return Ok(0);
         }
 
-        let mut desc= if !self.sb.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
-            inode.alloc_bio_desc(offset, size as usize, true)?
-        } else {
-            let dedup_inode = self.sb.get_dedup_inode(ino, false)?;
-            inode.alloc_bio_desc_dedup(&dedup_inode, offset, size as usize, true)?
-        };
+        let mut desc= self.sb.get_bio_desc(inode.as_ref(), offset, size as usize, true, false)?;
+        // let mut desc= if !self.sb.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
+        //     inode.alloc_bio_desc(offset, size as usize, true)?
+        // } else {
+        //     if let Some(dedup_inode) = self.sb.try_get_inode_dedup(&inode.get_digest().to_string(), ino, false)? {
+        //         inode.alloc_bio_desc_dedup(dedup_inode.as, offset, size as usize, true)?
+        //     } else {
+        //         inode.alloc_bio_desc(offset, size as usize, true)?
+        //     }
+        // };
 
         let mut all_cached = true;
         if self.amplify_io != 0 {

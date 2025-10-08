@@ -584,24 +584,59 @@ impl RafsSuper {
         self.superblock.get_max_ino()
     }
 
-    pub fn get_dedup_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
-        let inode = self.superblock.get_inode(ino, digest_validate)?;
-        // TODO:
-        let guard = self.dedup.read().unwrap();
-        if let Some((table_id, table_ino)) = guard.get_inode_map(ino){
-            if guard.is_same(&table_id) {
-                return Ok(inode);
-            } else if let Some(ds) = guard.get(&table_id) {
-                return ds.get_inode(table_ino, digest_validate);
-            }
-        } else {
-            drop(guard);
-            if let Some((ds, dedup_ino)) = self.dedup.write().unwrap().set(ino, &inode.get_digest().to_string()) {
-                return ds.get_inode(dedup_ino, digest_validate);
-            }
+    // pub fn get_dedup_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
+    //     let inode = self.superblock.get_inode(ino, digest_validate)?;
+    //     // TODO:
+    //     let guard = self.dedup.read().unwrap();
+    //     if let Some((table_id, table_ino)) = guard.get_inode_map(ino){
+    //         if guard.is_same(&table_id) {
+    //             return Ok(inode);
+    //         } else if let Some(ds) = guard.get(&table_id) {
+    //             return ds.get_inode(table_ino, digest_validate);
+    //         }
+    //     } else {
+    //         drop(guard);
+    //         if let Some((ds, dedup_ino)) = self.dedup.write().unwrap().set(ino, &inode.get_digest().to_string()) {
+    //             return ds.get_inode(dedup_ino, digest_validate);
+    //         }
+    //     }
+
+    //     return Ok(inode);
+    // }
+
+    //TODO: 
+    pub fn get_bio_desc(
+        &self,
+        inode: &dyn RafsInode,
+        offset: u64,
+        size: usize,
+        user_io: bool, 
+        digest_validate: bool
+    ) -> Result<RafsBioDesc> {
+        if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
+            return inode.alloc_bio_desc(offset, size, user_io);
         }
 
-        return Ok(inode);
+        let guard = self.dedup.read().unwrap();
+        if let Some((table_id, table_ino)) = guard.get_inode_map(inode.ino()){
+            
+            if guard.is_same(&table_id) {
+                return inode.alloc_bio_desc(offset, size, user_io);
+            } 
+            
+            if let Some(ds) = guard.get(&table_id) {
+                let dedup_inode = ds.get_inode(table_ino, digest_validate)?;
+                return inode.alloc_bio_desc_dedup(dedup_inode.as_ref(), offset, size, user_io);
+            }
+
+        }  else {
+            drop(guard);
+            if let Some((ds, dedup_ino)) = self.dedup.write().unwrap().set(inode.ino(), &inode.get_digest().to_string()) {
+                let dedup_inode = ds.get_inode(dedup_ino, digest_validate)?;
+                return inode.alloc_bio_desc_dedup(dedup_inode.as_ref(), offset, size, user_io);
+            }
+        }
+        inode.alloc_bio_desc(offset, size, user_io)
     }
 
     fn load_v4v5(&mut self, r: &mut RafsIoReader, sb: &RafsV5SuperBlock) -> Result<()> {
@@ -790,12 +825,14 @@ impl RafsSuper {
                             }
                         }
 
-                        let mut desc = if !self.deduplicate || !i.is_reg() || i.size() < 256 * 1024 {
-                            i.alloc_bio_desc(0, i.size() as usize, false)?
-                        } else {
-                            let dedup_inode = self.get_dedup_inode(i.ino(), false)?;
-                            i.alloc_bio_desc_dedup(&dedup_inode, 0, i.size() as usize, false)?
-                        };
+                        // let mut desc = if !self.deduplicate || !i.is_reg() || i.size() < 256 * 1024 {
+                        //     i.alloc_bio_desc(0, i.size() as usize, false)?
+                        // } else {
+                        //     let dedup_inode = self.get_dedup_inode(i.ino(), false)?;
+                        //     i.alloc_bio_desc_dedup(&dedup_inode, 0, i.size() as usize, false)?
+                        // };
+
+                        let mut desc = self.get_bio_desc(i.as_ref(), 0, i.size() as usize, false, false)?;
 
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
@@ -814,12 +851,14 @@ impl RafsSuper {
                         }
                     }
 
-                    let mut desc = if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
-                        inode.alloc_bio_desc(0, inode.size() as usize, false)?
-                    } else {
-                        let dedup_inode = self.get_dedup_inode(inode.ino(), false)?;
-                        inode.alloc_bio_desc_dedup(&dedup_inode, 0, inode.size() as usize, false)?
-                    };
+                    // let mut desc = if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
+                    //     inode.alloc_bio_desc(0, inode.size() as usize, false)?
+                    // } else {
+                    //     let dedup_inode = self.get_dedup_inode(inode.ino(), false)?;
+                    //     inode.alloc_bio_desc_dedup(&dedup_inode, 0, inode.size() as usize, false)?
+                    // };
+
+                    let mut desc = self.get_bio_desc(inode.as_ref(), 0, inode.size() as usize, false, false)?;
 
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
@@ -944,14 +983,15 @@ impl RafsSuper {
 
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
-            let ino = inode.ino();
 
-            let mut d = if !self.deduplicate || !inode.is_reg() || inode_size < 256 * 1024 {
-                inode.alloc_bio_desc(bound, sz as usize, false)?
-            } else {
-                let dedup_inode = self.get_dedup_inode(ino, false)?;
-                inode.alloc_bio_desc_dedup(&dedup_inode, bound, sz as usize, false)?
-            };
+            // let mut d = if !self.deduplicate || !inode.is_reg() || inode_size < 256 * 1024 {
+            //     inode.alloc_bio_desc(bound, sz as usize, false)?
+            // } else {
+            //     let dedup_inode = self.get_dedup_inode(ino, false)?;
+            //     inode.alloc_bio_desc_dedup(&dedup_inode, bound, sz as usize, false)?
+            // };
+
+            let mut d = self.get_bio_desc(inode, bound, sz as usize, false, false)?;
 
             // It is possible that read size is beyond file size, so chunks vector is zero length.
             if !d.bi_vec.is_empty() {
@@ -1028,12 +1068,14 @@ impl RafsSuper {
                         break;
                     }
 
-                    let mut d = if !self.deduplicate || next_size < 256 * 1024 {
-                        ni.alloc_bio_desc(0, sz as usize, false)?
-                    } else {
-                        let di = self.get_dedup_inode(next_ino, false)?;
-                        ni.alloc_bio_desc_dedup(&di, 0, sz as usize, false)?
-                    };
+                    // let mut d = if !self.deduplicate || next_size < 256 * 1024 {
+                    //     ni.alloc_bio_desc(0, sz as usize, false)?
+                    // } else {
+                    //     let di = self.get_dedup_inode(next_ino, false)?;
+                    //     ni.alloc_bio_desc_dedup(&di, 0, sz as usize, false)?
+                    // };
+
+                    let mut d = self.get_bio_desc(ni.as_ref(), 0, sz as usize, false, false)?;
 
                     if d.bi_vec.is_empty() {
                         warn!("A desc has no chunks appended");
@@ -1161,7 +1203,7 @@ pub trait RafsInode {
     ) -> Result<usize>;
 
     fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
-    fn alloc_bio_desc_dedup(&self, dedup_ino: &Arc<dyn RafsInode>, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
+    fn alloc_bio_desc_dedup(&self, dedup_ino: &dyn RafsInode, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
     fn as_any(&self) -> &dyn Any;
 }
 

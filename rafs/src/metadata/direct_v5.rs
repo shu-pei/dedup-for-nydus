@@ -748,10 +748,11 @@ impl RafsInode for OndiskInodeWrapper {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 
-    fn alloc_bio_desc_dedup(&self, dedup_inode: &Arc<dyn RafsInode>, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
-        let dedup_inode = dedup_inode.as_any()
-        .downcast_ref::<OndiskInodeWrapper>()
-        .ok_or_else(|| einval!("Failed to downcast dedup_inode to OndiskInodeWrapper"))?;
+    fn alloc_bio_desc_dedup(&self, dedup_inode: &dyn RafsInode, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
+        let dedup_inode = dedup_inode
+            .as_any()
+            .downcast_ref::<OndiskInodeWrapper>()
+            .ok_or_else(|| einval!("Failed to downcast dedup_inode to OndiskInodeWrapper"))?;
 
         rafsv5_alloc_bio_desc_dedup(self, dedup_inode, offset, size, user_io)
     }
@@ -759,6 +760,7 @@ impl RafsInode for OndiskInodeWrapper {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     impl_inode_wrapper!(is_dir, bool);
     impl_inode_wrapper!(is_reg, bool);
     impl_inode_wrapper!(is_symlink, bool);
