@@ -328,13 +328,4 @@ impl RafsBio {
             local_blob,
         }
     }
-
-    // pub fn update(
-    //     &mut self,
-    //     chunkinfo: Arc<dyn RafsChunkInfo>,
-    //     blob: Arc<RafsBlobEntry>
-    // ) {
-    //     self.local_chunkinfo = chunkinfo;
-    //     self.local_blob = blob;
-    // }
 }

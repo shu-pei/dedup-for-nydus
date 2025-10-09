@@ -584,26 +584,6 @@ impl RafsSuper {
         self.superblock.get_max_ino()
     }
 
-    // pub fn get_dedup_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
-    //     let inode = self.superblock.get_inode(ino, digest_validate)?;
-    //     // TODO:
-    //     let guard = self.dedup.read().unwrap();
-    //     if let Some((table_id, table_ino)) = guard.get_inode_map(ino){
-    //         if guard.is_same(&table_id) {
-    //             return Ok(inode);
-    //         } else if let Some(ds) = guard.get(&table_id) {
-    //             return ds.get_inode(table_ino, digest_validate);
-    //         }
-    //     } else {
-    //         drop(guard);
-    //         if let Some((ds, dedup_ino)) = self.dedup.write().unwrap().set(ino, &inode.get_digest().to_string()) {
-    //             return ds.get_inode(dedup_ino, digest_validate);
-    //         }
-    //     }
-
-    //     return Ok(inode);
-    // }
-
     //TODO: 
     pub fn get_bio_desc(
         &self,
@@ -619,7 +599,7 @@ impl RafsSuper {
 
         let guard = self.dedup.read().unwrap();
         if let Some((table_id, table_ino)) = guard.get_inode_map(inode.ino()){
-            
+
             if guard.is_same(&table_id) {
                 return inode.alloc_bio_desc(offset, size, user_io);
             } 
