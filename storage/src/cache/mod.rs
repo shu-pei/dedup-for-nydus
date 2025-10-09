@@ -58,7 +58,6 @@ struct MergedBackendRequest {
     // local chunks are continuous for dedup 
     pub local_chunks: Vec<Arc<dyn RafsChunkInfo>>,
     pub local_blob_offset: u64,
-    pub local_blob_size: u32,
     pub local_blob_entry: Arc<RafsBlobEntry>,
 }
 
@@ -91,7 +90,6 @@ impl MergedBackendRequest {
         tags.push(tag);
 
         let mut local_chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
-        let local_blob_size = local_first_cki.compress_size();
         let local_blob_offset = local_first_cki.compress_offset();
 
         local_chunks.push(local_first_cki);
@@ -104,7 +102,6 @@ impl MergedBackendRequest {
             blob_entry: blob,
             
             local_blob_offset,
-            local_blob_size,
             local_chunks,
             local_blob_entry: local_blob,
         }
@@ -122,7 +119,6 @@ impl MergedBackendRequest {
         self.chunks.push(cki);
         self.chunk_tags.push(tag);
 
-        self.local_blob_size += local_cki.compress_size();
         self.local_chunks.push(local_cki);
     }
 }

@@ -44,7 +44,7 @@ pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
 struct BlobCacheState {
     /// Index blob info by blob index, HashMap<blob_index, (blob_file, blob_size, Arc<ChunkMap>)>.
-    blob_map: HashMap<String, (File, u64, Arc<dyn ChunkMap + Sync + Send>)>,
+    blob_map: HashMap<u32, (File, u64, Arc<dyn ChunkMap + Sync + Send>)>,
     work_dir: String,
     backend_size_valid: bool,
     metrics: Arc<BlobcacheMetrics>,
@@ -54,7 +54,7 @@ struct BlobCacheState {
 impl BlobCacheState {
     fn get(&self, blob: &RafsBlobEntry) -> Option<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
         self.blob_map
-            .get(&blob.blob_id)
+            .get(&blob.blob_index)
             .map(|(file, size, chunk_map)| (file.as_raw_fd(), *size, chunk_map.clone()))
     }
 
@@ -96,7 +96,7 @@ impl BlobCacheState {
         };
 
         self.blob_map
-            .insert(blob.blob_id.clone(), (file, size, chunk_map.clone()));
+            .insert(blob.blob_index, (file, size, chunk_map.clone()));
 
         self.metrics
             .underlying_files
@@ -250,11 +250,7 @@ struct RequestRegion {
     blob_entry: Arc<RafsBlobEntry>,
 
     pub local_blob_address: u64,
-    pub local_blob_len: u32,
-    // pub local_seg_offset: u32,
-    // pub local_seg_len: u32,
     pub local_cki_set: Vec<Arc<dyn RafsChunkInfo>>,
-    // pub local_cki_tags: Vec<bool>,
     local_blob_entry: Arc<RafsBlobEntry>,
 }
 
@@ -274,11 +270,7 @@ impl RequestRegion {
             blob_entry,
 
             local_blob_address: 0,
-            local_blob_len: 0,
-            // local_seg_offset: 0,
-            // local_seg_len: 0,
             local_cki_set: Vec::new(),
-            // local_cki_tags: Vec::new(),
             local_blob_entry
         }
     }
@@ -290,12 +282,11 @@ impl RequestRegion {
         segment: IoInitiator,
         cki: Option<Arc<dyn RafsChunkInfo>>,
         local_start: u64,
-        local_len: u32,
         local_cki: Option<Arc<dyn RafsChunkInfo>>,
     ) -> StorageResult<()> {
         if self.status == RequestRegionStatus::Open
             && (self.blob_address + self.blob_len as u64 != start
-            || self.local_blob_address + self.local_blob_len as u64 != local_start)
+            || self.local_blob_address + self.blob_len as u64 != local_start)
         {
             return Err(StorageError::NotContinuous);
         }
@@ -315,7 +306,6 @@ impl RequestRegion {
             self.blob_address = start;
             self.blob_len = len;
             self.local_blob_address = local_start;
-            self.local_blob_len = local_len;
             self.concatenated = 1;
 
             if let Some(c) = cki {
@@ -334,7 +324,6 @@ impl RequestRegion {
 
         assert_eq!(self.status, RequestRegionStatus::Open);
         self.blob_len += len;
-        self.local_blob_len += local_len;
         self.concatenated += 1;
 
         if let Some(c) = cki {
@@ -696,12 +685,6 @@ impl BlobCache {
                                     == prior_cki.decompress_offset()
                                         + prior_cki.decompress_size() as u64
                             );
-                            let local_prior_cki = &req.local_chunks[i - 1];
-                            assert!(
-                                local_chunk.decompress_offset()
-                                    == local_prior_cki.decompress_offset()
-                                        + local_prior_cki.decompress_size() as u64
-                            );
                         }
                         region
                             .as_mut()
@@ -712,9 +695,7 @@ impl BlobCache {
                                 IoInitiator::User(s.clone()),
                                 None,
                                 local_chunk.decompress_offset(),
-                                local_chunk.decompress_size(),
                                 None,
-
                             )
                             .map_err(|e| einval!(e))?;
                     }
@@ -757,7 +738,6 @@ impl BlobCache {
                                 IoInitiator::User(s.clone()),
                                 Some(chunk.clone()),
                                 local_chunk.decompress_offset(),
-                                local_chunk.decompress_size(),
                                 Some(local_chunk.clone()),
                             )
                             .map_err(|e| einval!(e))?;
@@ -785,12 +765,6 @@ impl BlobCache {
                                 == prior_cki.decompress_offset()
                                     + prior_cki.decompress_size() as u64
                         );
-                        let local_prior_cki = &req.local_chunks[i - 1];
-                        assert!(
-                            local_chunk.decompress_offset()
-                                == local_prior_cki.decompress_offset()
-                                    + local_prior_cki.decompress_size() as u64
-                        );
                     }
 
                     // Safe since the region must be open.
@@ -807,7 +781,6 @@ impl BlobCache {
                         initiator,
                         Some(chunk.clone()),
                         local_chunk.compress_offset(),
-                        local_chunk.compress_size(),
                         Some(local_chunk.clone()),
                     )
                     .map_err(|e| einval!(e))?;
@@ -1107,10 +1080,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     let continuous_chunks = &mr.chunks;
                     let blob_id = &mr.blob_entry.blob_id;
 
-                    // let local_blob_offset = mr.local_blob_offset;
-                    let local_blob_size = mr.local_blob_size;
                     let local_continuous_chunks = &mr.local_chunks;
-                    // let local_blob_id = &mr.local_blob_entry.blob_id;
                     let mut issue_batch: bool;
 
                     trace!(
@@ -1196,7 +1166,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
                     // We can measure merging possibility by this.
                     blobcache.metrics.prefetch_mr_count.inc();
-                    blobcache.metrics.prefetch_data_amount.add(local_blob_size as u64);
+                    blobcache.metrics.prefetch_data_amount.add(blob_size as u64);
 
                     if let Ok(chunks) = blobcache.read_chunks(
                         blob_id,
