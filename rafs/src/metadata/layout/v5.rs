@@ -48,6 +48,7 @@ use nydus_utils::ByteSize;
 use storage::compress;
 use storage::device::{RafsBio, RafsBioDesc};
 
+use crate::metadata::dedup_v5::{DedupInode, BlobTableData};
 use crate::metadata::layout::{
     bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
     RAFS_SUPER_VERSION_V5,
@@ -427,6 +428,28 @@ impl RafsV5BlobTable {
     pub fn new() -> Self {
         RafsV5BlobTable {
             entries: Vec::new(),
+            extended: RafsV5ExtBlobTable::new(),
+        }
+    }
+
+    pub fn new_from(data: &BlobTableData) -> Self {
+        let entries = data.entries
+            .iter()
+            .map(|entry_data| {
+                Arc::new(RafsBlobEntry {
+                    chunk_count: entry_data.chunk_count,
+                    readahead_offset: entry_data.readahead_offset,
+                    readahead_size: entry_data.readahead_size,
+                    blob_id: entry_data.blob_id.clone(),
+                    blob_index: entry_data.blob_index,
+                    blob_cache_size: entry_data.blob_cache_size,
+                    compressed_blob_size: entry_data.compressed_blob_size,
+                })
+            })
+            .collect();
+
+        RafsV5BlobTable {
+            entries,
             extended: RafsV5ExtBlobTable::new(),
         }
     }
@@ -1111,7 +1134,7 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
 
 pub(crate) fn rafsv5_alloc_bio_desc_dedup<I: RafsInode + RafsV5InodeOps>(
     inode: &I,
-    dedup_inode: &I,
+    dedup_inode: &DedupInode,
     offset: u64,
     size: usize,
     user_io: bool,

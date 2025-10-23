@@ -8,13 +8,13 @@ use std::ffi::{OsStr, OsString};
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
-use std::any::Any;
 
 use fuse_backend_rs::abi::linux_abi;
 use fuse_backend_rs::api::filesystem::Entry;
 
 use storage::device::RafsBioDesc;
 
+use crate::metadata::dedup_v5::DedupInode;
 use crate::metadata::{
     layout::{
         v5::{
@@ -236,16 +236,12 @@ impl RafsInode for MockInode {
 
     fn alloc_bio_desc_dedup(
         &self,
-        _dedup_ino: &dyn RafsInode,
+        _dedup_ino: &DedupInode,
         _offset: u64,
         _size: usize,
         _user_io: bool,
     ) -> Result<RafsBioDesc> {
         unimplemented!("MockInode does not yet implement alloc_bio_desc_dedup");
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        unimplemented!("MockInode does not yet implement as_any");
     }
 
     impl_getter!(ino, i_ino, u64);
@@ -256,6 +252,7 @@ impl RafsInode for MockInode {
 }
 
 impl RafsV5InodeOps for MockInode {
+
     fn get_blob_by_index(&self, _idx: u32) -> Result<Arc<RafsBlobEntry>> {
         Ok(Arc::new(RafsBlobEntry::default()))
     }

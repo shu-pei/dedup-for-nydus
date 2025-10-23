@@ -44,7 +44,7 @@ pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
 struct BlobCacheState {
     /// Index blob info by blob index, HashMap<blob_index, (blob_file, blob_size, Arc<ChunkMap>)>.
-    blob_map: HashMap<u32, (File, u64, Arc<dyn ChunkMap + Sync + Send>)>,
+    blob_map: HashMap<String, (File, u64, Arc<dyn ChunkMap + Sync + Send>)>,
     work_dir: String,
     backend_size_valid: bool,
     metrics: Arc<BlobcacheMetrics>,
@@ -54,7 +54,7 @@ struct BlobCacheState {
 impl BlobCacheState {
     fn get(&self, blob: &RafsBlobEntry) -> Option<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
         self.blob_map
-            .get(&blob.blob_index)
+            .get(&blob.blob_id)
             .map(|(file, size, chunk_map)| (file.as_raw_fd(), *size, chunk_map.clone()))
     }
 
@@ -96,7 +96,7 @@ impl BlobCacheState {
         };
 
         self.blob_map
-            .insert(blob.blob_index, (file, size, chunk_map.clone()));
+            .insert(blob.blob_id.clone(), (file, size, chunk_map.clone()));
 
         self.metrics
             .underlying_files
@@ -942,7 +942,7 @@ impl BlobCache {
 
         let local_prior_cki = &prior.local_chunkinfo;
         let local_cur_cki = &cur.local_chunkinfo;
-        let local_prior_end = local_prior_cki.compress_offset() + local_prior_cki.compress_size() as u64;
+        let local_prior_end = local_prior_cki.compress_offset() + prior_cki.compress_size() as u64;
         let local_cur_offset = local_cur_cki.compress_offset();
         if prior_end == cur_offset && prior.blob.blob_id == cur.blob.blob_id &&
         local_prior_end == local_cur_offset && prior.local_blob.blob_id == cur.local_blob.blob_id {

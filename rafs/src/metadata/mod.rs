@@ -5,16 +5,15 @@
 
 //! Structs and Traits for RAFS file system meta data management.
 
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::{Error, Result};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
-use std::any::Any;
 
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
@@ -27,16 +26,17 @@ use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-use self::database::DedupClient;
+use self::dedup_v5::{DedupState, DedupInode};
 use self::layout::v5::{RafsV5BlobTable, RafsV5PrefetchTable, RafsV5SuperBlock};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
-use crate::{RafsError, RafsIoRead, RafsIoReader, RafsIoWriter, RafsResult};
+use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
 
 pub mod cached_v5;
 pub mod direct_v5;
+pub mod dedup_v5;
 pub mod layout;
 pub mod database;
 mod noop;
@@ -247,7 +247,6 @@ impl Display for RafsMode {
     }
 }
 
-
 pub struct DedupSuper {
     pub mode: RafsMode,
     pub validate_digest: bool,
@@ -347,97 +346,93 @@ impl DedupSuper {
 }
 
 
-pub struct DedupState {
-    pub dedup_superblock: HashMap<String, Arc<DedupSuper>>,
-    pub inode_map: HashMap<u64, (String, u64)>,
-    pub id: String,
-    pub dc: Option<DedupClient>,
-}
+// pub struct DedupState {
+//     pub meta: DedupMeta,
+//     pub id: String,
+// }
 
-impl Default for DedupState {
-    fn default() -> Self {
-        Self {
-            dedup_superblock: HashMap::new(),
-            inode_map: HashMap::new(),
-            id: String::new(),
-            dc: None,
-        }
-    }
-}
+// impl Default for DedupState {
+//     fn default() -> Self {
+//         Self {
+//             meta: DedupMeta::new(),
+//             id: String::new(),
+//         }
+//     }
+// }
 
-impl DedupState {
-    pub fn get_inode_map(&self, ino: u64) -> Option<(String, u64)> {
-        if let Some((table_id, table_ino)) = self.inode_map.get(&ino) {
-            Some((table_id.clone(), *table_ino))
-        } else {
-            None
-        }
-    } 
+// impl DedupState {
+//     pub fn get_inode_map(&self, ino: u64) -> Option<(String, u64)> {
+//         if let Some((table_id, table_ino)) = self.inode_map.get(&ino) {
+//             Some((table_id.clone(), *table_ino))
+//         } else {
+//             None
+//         }
+//     } 
 
-    pub fn is_same(&self, id: &String) -> bool {
-        if *id == self.id {
-            return true;
-        } else {
-            return false;
-        }
-    }
+//     pub fn is_same(&self, id: &String) -> bool {
+//         if *id == self.id {
+//             return true;
+//         } else {
+//             return false;
+//         }
+//     }
 
-    pub fn get(&self, table_id: &String) -> Option<Arc<DedupSuper>> {
-        self.dedup_superblock.get(table_id).cloned()
-    }
+//     pub fn get(&self, table_id: &String) -> Option<Arc<DedupSuper>> {
+//         self.dedup_superblock.get(table_id).cloned()
+//     }
 
-    pub fn set(&mut self, ino: u64, digest: &String) -> Option<(Arc<DedupSuper>, u64)> {
-        if let Some(dc) = &self.dc {
-            let resp= match dc.query(&digest, &self.id, ino) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("query dedup info failed: {:?}", e);
-                    return None;
-                }
-            };
+//     pub fn set(&mut self, ino: u64, digest: &String) -> Option<(Arc<DedupSuper>, u64)> {
+//         if let Some(dc) = &self.dc {
+//             let resp= match dc.query(&digest, &self.id, ino) {
+//                 Ok(r) => r,
+//                 Err(e) => {
+//                     warn!("query dedup info failed: {:?}", e);
+//                     return None;
+//                 }
+//             };
 
-            self.inode_map.insert(ino, (resp.id.clone(), resp.ino));
-            if resp.id == self.id {
-                return None;
-            }
+//             self.inode_map.insert(ino, (resp.id.clone(), resp.ino));
+//             if resp.id == self.id {
+//                 return None;
+//             }
 
-            if !self.dedup_superblock.contains_key(&resp.id) {
-                let path = match dc.getbs(&resp.id) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("query dedup bootstrap path failed: {:?}", e);
-                        return None;
-                    }
-                };
-                let mut bootstrap = match <dyn RafsIoRead>::from_file(&path.bootstrap) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!("open bootstrap {} failed: {:?}", path.bootstrap, e);
-                        return None;
-                    }
-                };
+//             if !self.dedup_superblock.contains_key(&resp.id) {
+//                 let path = match dc.getbs(&resp.id) {
+//                     Ok(p) => p,
+//                     Err(e) => {
+//                         warn!("query dedup bootstrap path failed: {:?}", e);
+//                         return None;
+//                     }
+//                 };
+//                 let mut bootstrap = match <dyn RafsIoRead>::from_file(&path.bootstrap) {
+//                     Ok(b) => b,
+//                     Err(e) => {
+//                         warn!("open bootstrap {} failed: {:?}", path.bootstrap, e);
+//                         return None;
+//                     }
+//                 };
 
-                let mut sb = DedupSuper::new().ok()?;
-                sb.load(&mut bootstrap).ok()?;
-                self.dedup_superblock.insert(resp.id.clone(), Arc::new(sb));
-            }
+//                 let mut sb = DedupSuper::new().ok()?;
+//                 sb.load(&mut bootstrap).ok()?;
+//                 self.dedup_superblock.insert(resp.id.clone(), Arc::new(sb));
+//             }
 
-            let superblock = self.dedup_superblock.get(&resp.id)?;
-            Some((superblock.clone(), resp.ino))
-        } else {
-            None
-        }
-    }
+//             let superblock = self.dedup_superblock.get(&resp.id)?;
+//             Some((superblock.clone(), resp.ino))
+//         } else {
+//             None
+//         }
+//     }
 
-    pub fn destroy(&mut self) {
-        for (_key, ds_arc) in self.dedup_superblock.iter_mut() {
-            Arc::get_mut(ds_arc)
-                .expect("DedupSuper is no longer used.")
-                .destroy();
-        }
-        self.dedup_superblock.clear();
-    }
-}
+//     pub fn destroy(&mut self) {
+//         for (_key, ds_arc) in self.dedup_superblock.iter_mut() {
+//             Arc::get_mut(ds_arc)
+//                 .expect("DedupSuper is no longer used.")
+//                 .destroy();
+//         }
+//         self.dedup_superblock.clear();
+//     }
+// }
 
 /// Cached Rafs super block and inode information.
 pub struct RafsSuper {
@@ -447,7 +442,7 @@ pub struct RafsSuper {
     pub superblock: Arc<dyn RafsSuperBlock + Sync + Send>,
 
     pub deduplicate: bool,
-    pub dedup: Arc<RwLock<DedupState>>,
+    pub dedupstate: Arc<DedupState>,
 }
 
 impl Default for RafsSuper {
@@ -459,7 +454,7 @@ impl Default for RafsSuper {
             superblock: Arc::new(NoopSuperBlock::new()),
 
             deduplicate: false,
-            dedup: Arc::new(RwLock::new(DedupState::default())),
+            dedupstate: Arc::new(DedupState::new()),
         }
     }
 }
@@ -485,23 +480,10 @@ impl RafsSuper {
         Ok(rs)
     }
 
-    pub fn init(&mut self, snapshot_id: &String, dedupsock: &String) -> Result<()>{
-        let mut dedup = self.dedup.write().unwrap();
-        dedup.id = snapshot_id.clone();
-        dedup.dc = Some(DedupClient::new(dedupsock)?);
-        Ok(())
-    }
-
     pub fn destroy(&mut self) {
         Arc::get_mut(&mut self.superblock)
             .expect("Inodes are no longer used.")
             .destroy();
-
-        Arc::get_mut(&mut self.dedup)
-            .expect("Inodes are no longer used.")
-            .write()
-            .unwrap()
-            .destroy();    
     }
 
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
@@ -591,32 +573,35 @@ impl RafsSuper {
         offset: u64,
         size: usize,
         user_io: bool, 
-        digest_validate: bool
     ) -> Result<RafsBioDesc> {
         if !self.deduplicate || !inode.is_reg() || inode.size() < 256 * 1024 {
             return inode.alloc_bio_desc(offset, size, user_io);
         }
 
-        let guard = self.dedup.read().unwrap();
-        if let Some((table_id, table_ino)) = guard.get_inode_map(inode.ino()){
-
-            if guard.is_same(&table_id) {
-                return inode.alloc_bio_desc(offset, size, user_io);
-            } 
-            
-            if let Some(ds) = guard.get(&table_id) {
-                let dedup_inode = ds.get_inode(table_ino, digest_validate)?;
-                return inode.alloc_bio_desc_dedup(dedup_inode.as_ref(), offset, size, user_io);
-            }
-
-        }  else {
-            drop(guard);
-            if let Some((ds, dedup_ino)) = self.dedup.write().unwrap().set(inode.ino(), &inode.get_digest().to_string()) {
-                let dedup_inode = ds.get_inode(dedup_ino, digest_validate)?;
-                return inode.alloc_bio_desc_dedup(dedup_inode.as_ref(), offset, size, user_io);
-            }
+        if let Some(dedup_inode) = self.dedupstate.get_inode(inode.ino()) {
+            return inode.alloc_bio_desc_dedup(dedup_inode.as_ref(), offset, size, user_io);
         }
+
         inode.alloc_bio_desc(offset, size, user_io)
+    }
+
+    //TODO:
+    pub fn init_dedupstate(&mut self, sid: &String, sock: &String) -> Result<()> {
+        // !inode.is_reg() || inode.size() < 256 * 1024
+        let mut inodes: Vec<Arc<dyn RafsInode>> = Vec::new();
+        for ino in 1..=self.get_max_ino() {
+            let inode = self.get_inode(ino, false)?;
+            if !inode.is_reg() || inode.size() < 256 * 1024 {
+                continue;
+            }
+            inodes.push(inode);
+        }
+        let mut dedupstate = DedupState::new();
+        let blobs = self.superblock.get_blobs();
+        dedupstate.process(sock, sid, inodes, blobs)?;
+        self.dedupstate = Arc::new(dedupstate);
+        
+        Ok(())
     }
 
     fn load_v4v5(&mut self, r: &mut RafsIoReader, sb: &RafsV5SuperBlock) -> Result<()> {
@@ -812,7 +797,7 @@ impl RafsSuper {
                         //     i.alloc_bio_desc_dedup(&dedup_inode, 0, i.size() as usize, false)?
                         // };
 
-                        let mut desc = self.get_bio_desc(i.as_ref(), 0, i.size() as usize, false, false)?;
+                        let mut desc = self.get_bio_desc(i.as_ref(), 0, i.size() as usize, false)?;
 
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
@@ -838,7 +823,7 @@ impl RafsSuper {
                     //     inode.alloc_bio_desc_dedup(&dedup_inode, 0, inode.size() as usize, false)?
                     // };
 
-                    let mut desc = self.get_bio_desc(inode.as_ref(), 0, inode.size() as usize, false, false)?;
+                    let mut desc = self.get_bio_desc(inode.as_ref(), 0, inode.size() as usize, false)?;
 
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
@@ -971,7 +956,7 @@ impl RafsSuper {
             //     inode.alloc_bio_desc_dedup(&dedup_inode, bound, sz as usize, false)?
             // };
 
-            let mut d = self.get_bio_desc(inode, bound, sz as usize, false, false)?;
+            let mut d = self.get_bio_desc(inode, bound, sz as usize, false)?;
 
             // It is possible that read size is beyond file size, so chunks vector is zero length.
             if !d.bi_vec.is_empty() {
@@ -1055,7 +1040,7 @@ impl RafsSuper {
                     //     ni.alloc_bio_desc_dedup(&di, 0, sz as usize, false)?
                     // };
 
-                    let mut d = self.get_bio_desc(ni.as_ref(), 0, sz as usize, false, false)?;
+                    let mut d = self.get_bio_desc(ni.as_ref(), 0, sz as usize, false)?;
 
                     if d.bi_vec.is_empty() {
                         warn!("A desc has no chunks appended");
@@ -1183,8 +1168,7 @@ pub trait RafsInode {
     ) -> Result<usize>;
 
     fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
-    fn alloc_bio_desc_dedup(&self, dedup_ino: &dyn RafsInode, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
-    fn as_any(&self) -> &dyn Any;
+    fn alloc_bio_desc_dedup(&self, dedup_inode: &DedupInode, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

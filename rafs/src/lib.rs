@@ -42,6 +42,7 @@ pub enum RafsError {
     ParseConfig(serde_json::Error),
     SwapBackend(Error),
     FillSuperblock(Error),
+    Deduplated(Error),
     CreateDevice(Error),
     Prefetch(String),
     Configure(String),

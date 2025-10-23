@@ -29,10 +29,7 @@ func Start(ctx context.Context, cfg config.Config) error {
 		ListeningSocketPath: cfg.Address,
 	}
 
-	ds, err := dedupserve.NewDedupServer(cfg.RootDir)
-	if err != nil {
-		return errors.Wrap(err, "failed to initialize dedupserve")
-	}
+	ds := dedupserve.Newdedupserve(cfg.RootDir)
 	go func() {
 		if err := ds.Serve(stopSignal); err != nil {
 			log.L.WithError(err).Error("dedup server stopped with error")

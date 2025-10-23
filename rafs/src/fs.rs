@@ -195,7 +195,9 @@ impl Rafs {
         sb.load(r).map_err(RafsError::FillSuperblock)?;
         if sb.deduplicate {
             if let (Some(sid) , Some(sock)) = (snapshot_id, dedupsock) {
-                sb.init(sid, sock).map_err(RafsError::FillSuperblock)?;
+                // dedup
+                sb.init_dedupstate(sid, sock).map_err(RafsError::Deduplated)?;
+                info!("init dedup ok");
             }
         } 
 
@@ -632,7 +634,8 @@ impl FileSystem for Rafs {
             return Ok(0);
         }
 
-        let mut desc= self.sb.get_bio_desc(inode.as_ref(), offset, size as usize, true, false)?;
+        // let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
+        let mut desc= self.sb.get_bio_desc(inode.as_ref(), offset, size as usize, true)?;
 
         let mut all_cached = true;
         if self.amplify_io != 0 {

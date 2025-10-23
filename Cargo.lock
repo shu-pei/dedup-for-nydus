@@ -1430,6 +1430,7 @@ dependencies = [
  "base64",
  "bitflags",
  "blake3 1.0.0",
+ "byteorder",
  "flate2",
  "fuse-rs",
  "futures",
