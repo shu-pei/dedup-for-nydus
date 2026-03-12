@@ -34,16 +34,13 @@ use storage::device::RafsBioDesc;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags,
-    RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable,
-    RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
+    RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable, RafsV5XAttrsTable, rafsv5_align, rafsv5_alloc_bio_desc_dedup, rafsv5_validate_digest
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
 };
 use crate::metadata::{
-    Attr, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
-    RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
+    Attr, DedupState, Entry, Inode, RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -744,8 +741,8 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
-        rafsv5_alloc_bio_desc(self, offset, size, user_io)
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool, ds: &DedupState) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc_dedup(self, offset, size, user_io, ds)
     }
 
     impl_inode_wrapper!(is_dir, bool);

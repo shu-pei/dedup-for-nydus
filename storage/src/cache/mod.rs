@@ -54,6 +54,10 @@ struct MergedBackendRequest {
     pub blob_offset: u64,
     pub blob_size: u32,
     pub blob_entry: Arc<RafsBlobEntry>,
+
+    pub local_chunks: Vec<Arc<dyn RafsChunkInfo>>,
+    pub local_blob_offset: u64,
+    pub local_blob_entry: Arc<RafsBlobEntry>,
 }
 
 impl Debug for MergedBackendRequest {
@@ -68,7 +72,7 @@ impl Debug for MergedBackendRequest {
 }
 
 impl MergedBackendRequest {
-    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>, bio: &RafsBio) -> Self {
+    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>, first_local_cki: Arc<dyn RafsChunkInfo>, first_local_blob: Arc<RafsBlobEntry>, bio: &RafsBio) -> Self {
         let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
         let mut tags: Vec<IoInitiator> = Vec::new();
         let blob_size = first_cki.compress_size();
@@ -84,16 +88,25 @@ impl MergedBackendRequest {
 
         tags.push(tag);
 
+        let mut local_chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
+        let local_blob_offset = first_local_cki.compress_offset();
+
+        local_chunks.push(first_local_cki);
+
         MergedBackendRequest {
             blob_offset,
             blob_size,
             chunks,
             chunk_tags: tags,
             blob_entry: blob,
+
+            local_blob_offset,
+            local_chunks,
+            local_blob_entry: first_local_blob,
         }
     }
 
-    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
+    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, local_cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
         self.blob_size += cki.compress_size();
 
         let tag = if bio.user_io {
@@ -104,6 +117,7 @@ impl MergedBackendRequest {
 
         self.chunks.push(cki);
         self.chunk_tags.push(tag);
+        self.local_chunks.push(local_cki);
     }
 }
 

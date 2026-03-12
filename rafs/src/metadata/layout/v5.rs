@@ -52,7 +52,7 @@ use crate::metadata::layout::{
     bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
     RAFS_SUPER_VERSION_V5,
 };
-use crate::metadata::{Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::metadata::{DedupState, Inode, RAFS_DEFAULT_BLOCK_SIZE, RafsInode, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
@@ -1101,7 +1101,61 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     for idx in index_start..index_end {
         let chunk = inode.get_chunk_info(idx)?;
         let blob = inode.get_blob_by_index(chunk.blob_index())?;
-        if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob, user_io) {
+        if !add_chunk_to_bio_desc(offset, end, chunk.clone(), &mut desc, blksize as u32, blob.clone(), user_io, chunk, blob) {
+            break;
+        }
+    }
+
+    Ok(desc)
+}
+
+pub(crate) fn rafsv5_alloc_bio_desc_dedup<I: RafsInode + RafsV5InodeOps>(
+    inode: &I,
+    offset: u64,
+    size: usize,
+    user_io: bool,
+    ds: &DedupState,
+) -> Result<RafsBioDesc> {
+    // Do not process zero size bio
+    let mut desc = RafsBioDesc::new();
+    if size == 0 {
+        return Ok(desc);
+    }
+
+    let end = offset
+        .checked_add(size as u64)
+        .ok_or_else(|| einval!("invalid read size"))?;
+
+    let blksize = inode.get_blocksize() as u64;
+    let (index_start, index_end) = calculate_bio_chunk_index(
+        offset,
+        end,
+        blksize,
+        inode.get_child_count(),
+        inode.has_hole(),
+    );
+
+    trace!(
+            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
+            offset, size, inode.size(), blksize, index_start, index_end, inode.get_child_count()
+        );
+
+    for idx in index_start..index_end {
+        let chunk = inode.get_chunk_info(idx)?;
+        let blob = inode.get_blob_by_index(chunk.blob_index())?;
+
+        let (local_chunk, local_blob) = if inode.size() >= 256 * 1024 {
+            if let Some((lc, lb)) = ds.get_chunk(chunk.block_id())? {
+                (lc, lb)
+            } else {
+                ds.set_chunk(chunk.clone(), blob.clone())?;
+                (chunk.clone(), blob.clone())
+            }
+        } else {
+            (chunk.clone(), blob.clone())
+        };
+
+        if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob, user_io, local_chunk, local_blob) {
             break;
         }
     }
@@ -1126,6 +1180,8 @@ fn add_chunk_to_bio_desc(
     blksize: u32,
     blob: Arc<RafsBlobEntry>,
     user_io: bool,
+    local_chunk: Arc<dyn RafsChunkInfo>,
+    local_blob: Arc<RafsBlobEntry>,
 ) -> bool {
     if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
         return true;
@@ -1152,6 +1208,8 @@ fn add_chunk_to_bio_desc(
         (chunk_end - chunk_start) as usize,
         blksize,
         user_io,
+        local_chunk,
+        local_blob,
     );
 
     desc.bi_size += bio.size;

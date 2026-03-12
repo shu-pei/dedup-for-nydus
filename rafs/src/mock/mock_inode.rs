@@ -14,6 +14,7 @@ use fuse_backend_rs::api::filesystem::Entry;
 
 use storage::device::RafsBioDesc;
 
+use crate::metadata::DedupState;
 use crate::metadata::{
     layout::{
         v5::{
@@ -217,7 +218,7 @@ impl RafsInode for MockInode {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool, _: &DedupState) -> Result<RafsBioDesc> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 

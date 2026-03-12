@@ -262,6 +262,9 @@ pub struct RafsBio {
     /// It might be initiated by user io amplification. With this flag, lower device
     /// layer is acknowledged with how to fill up user provided buffer.
     pub user_io: bool,
+
+    pub local_chunkinfo: Arc<dyn RafsChunkInfo>,
+    pub local_blob: Arc<RafsBlobEntry>,
 }
 
 impl Debug for RafsBio {
@@ -285,6 +288,8 @@ impl RafsBio {
         size: usize,
         blksize: u32,
         user_io: bool,
+        local_chunkinfo: Arc<dyn RafsChunkInfo>,
+        local_blob: Arc<RafsBlobEntry>,
     ) -> Self {
         RafsBio {
             chunkinfo,
@@ -293,6 +298,8 @@ impl RafsBio {
             size,
             blksize,
             user_io,
+            local_chunkinfo,
+            local_blob,
         }
     }
 }

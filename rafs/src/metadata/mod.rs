@@ -5,14 +5,14 @@
 
 //! Structs and Traits for RAFS file system meta data management.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::{Error, Result};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -23,6 +23,7 @@ use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
 use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
+use once_cell::sync::OnceCell;
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
@@ -222,6 +223,113 @@ pub enum RafsMode {
     Cached,
 }
 
+// -------------------peipei---------------------------
+pub struct DedupState {
+    pub chunk_table: Arc<RwLock<ChunkTable>>,
+    pub blob_table: Arc<RwLock<BlobTable>>,
+}
+
+impl DedupState {
+    pub fn new() -> Self {
+        Self {
+            chunk_table: Arc::new(RwLock::new(ChunkTable::new())),
+            blob_table: Arc::new(RwLock::new(BlobTable::new())),
+        }
+    }
+
+    // 使用时传入clone
+    pub fn set_chunk(&self, chunk: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Result<()> {
+        let blob_guard = self.blob_table.read().unwrap();
+        let blob_index = match blob_guard.get_index(blob.as_ref()) {
+            Some(index) => index,
+            None => {
+                drop(blob_guard);
+                self.blob_table.write().unwrap().set(blob)
+            }
+        };
+
+        let mut chunk_guard = self.chunk_table.write().unwrap();
+        chunk_guard.set(chunk.block_id().clone(), chunk, blob_index);
+        Ok(())
+    }
+
+    pub fn get_chunk(&self, digest: &RafsDigest) -> Result<Option<(Arc<dyn RafsChunkInfo>, Arc<RafsBlobEntry>)>> {
+        let chunk_guard = self.chunk_table.read().unwrap();
+        if let Some((chunk, blob_index)) = chunk_guard.get(digest) {
+            let blob_guard = self.blob_table.read().unwrap();
+            if let Some(blob_entry) = blob_guard.get(blob_index) {
+                return Ok(Some((chunk, blob_entry)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub struct ChunkTable {
+    pub chunk_map: HashMap<RafsDigest, (Arc<dyn RafsChunkInfo>, u32)>,
+}
+
+impl ChunkTable {
+    pub fn new() -> Self {
+        Self {
+            chunk_map: HashMap::new(),
+        }
+    }
+
+    fn get(&self, digest: &RafsDigest) -> Option<(Arc<dyn RafsChunkInfo>, u32)> {
+        self.chunk_map.get(digest).cloned()
+    }
+
+    fn set(&mut self, digest: RafsDigest, chunk: Arc<dyn RafsChunkInfo>, blob_index: u32) {
+        self.chunk_map.insert(digest, (chunk, blob_index));
+    }
+}
+
+pub struct BlobTable {
+    pub blob_index_map: HashMap<String, u32>,
+    pub blob_table: Vec<Arc<RafsBlobEntry>>,
+    pub blob_count: u32,
+}
+
+impl BlobTable {
+    pub fn new() -> Self {
+        Self {
+            blob_index_map: HashMap::new(),
+            blob_table: Vec::new(),
+            blob_count: 0, 
+        }
+    }
+
+    fn get_index(&self, blob: &RafsBlobEntry) -> Option<u32> {
+        self.blob_index_map.get(&blob.blob_id).copied()
+    }
+
+    fn get(&self, idx: u32) -> Option<Arc<RafsBlobEntry>> {
+        self.blob_table.get(idx as usize).cloned()
+    }
+
+    fn set(&mut self, blob: Arc<RafsBlobEntry>) -> u32 {
+        if let Some(idx) = self.blob_index_map.get(&blob.blob_id).copied() {
+            return idx;
+        }
+
+        let idx = self.blob_count;
+        self.blob_count += 1;
+        self.blob_index_map.insert(blob.blob_id.clone(), idx);
+        self.blob_table.push(blob);
+        idx
+    }
+}
+
+static DEDUP_STATE: OnceCell<Arc<DedupState>> = OnceCell::new();
+
+fn get_dedup_state() -> Arc<DedupState> {
+    DEDUP_STATE
+        .get_or_init(|| Arc::new(DedupState::new()))
+        .clone()
+}
+// peipei
+
 impl FromStr for RafsMode {
     type Err = Error;
 
@@ -249,6 +357,7 @@ pub struct RafsSuper {
     pub validate_digest: bool,
     pub meta: RafsSuperMeta,
     pub superblock: Arc<dyn RafsSuperBlock + Sync + Send>,
+    pub dedup_state: Arc<DedupState>,
 }
 
 impl Default for RafsSuper {
@@ -258,6 +367,7 @@ impl Default for RafsSuper {
             validate_digest: false,
             meta: RafsSuperMeta::default(),
             superblock: Arc::new(NoopSuperBlock::new()),
+            dedup_state: get_dedup_state(),
         }
     }
 }
@@ -554,7 +664,7 @@ impl RafsSuper {
                                 hardlinks.insert(i.ino());
                             }
                         }
-                        let mut desc = i.alloc_bio_desc(0, i.size() as usize, false)?;
+                        let mut desc = i.alloc_bio_desc(0, i.size() as usize, false, self.dedup_state.as_ref())?;
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
 
@@ -571,7 +681,7 @@ impl RafsSuper {
                             hardlinks.insert(inode.ino());
                         }
                     }
-                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false)?;
+                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false, self.dedup_state.as_ref())?;
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
 
@@ -696,7 +806,7 @@ impl RafsSuper {
 
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
-            let mut d = inode.alloc_bio_desc(bound, sz as usize, false)?;
+            let mut d = inode.alloc_bio_desc(bound, sz as usize, false, self.dedup_state.as_ref())?;
 
             // It is possible that read size is beyond file size, so chunks vector is zero length.
             if !d.bi_vec.is_empty() {
@@ -773,7 +883,7 @@ impl RafsSuper {
                         break;
                     }
 
-                    let mut d = ni.alloc_bio_desc(0, sz as usize, false)?;
+                    let mut d = ni.alloc_bio_desc(0, sz as usize, false, self.dedup_state.as_ref())?;
 
                     if d.bi_vec.is_empty() {
                         warn!("A desc has no chunks appended");
@@ -900,7 +1010,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool, dedup_state: &DedupState) -> Result<RafsBioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

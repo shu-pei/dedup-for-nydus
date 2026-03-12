@@ -624,7 +624,8 @@ impl FileSystem for Rafs {
             recorder.mark_success(0);
             return Ok(0);
         }
-        let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
+ 
+        let mut desc = inode.alloc_bio_desc(offset, size as usize, true, self.sb.dedup_state.as_ref())?;
         let mut all_cached = true;
 
         if self.amplify_io != 0 {
